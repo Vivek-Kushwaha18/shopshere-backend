@@ -10,11 +10,13 @@ from app.models.base import Base
 class User(Base):
     __tablename__ = "users"
 
+    # User ID
     id: Mapped[int] = mapped_column(
         primary_key=True,
         autoincrement=True
     )
 
+    # User information
     full_name: Mapped[str] = mapped_column(
         String(100),
         nullable=False
@@ -32,6 +34,7 @@ class User(Base):
         nullable=True
     )
 
+    # Authentication
     password_hash: Mapped[str] = mapped_column(
         String(255),
         nullable=False
@@ -55,6 +58,7 @@ class User(Base):
         nullable=False
     )
 
+    # Forgot Password
     reset_token: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True
@@ -65,6 +69,7 @@ class User(Base):
         nullable=True
     )
 
+    # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
@@ -77,4 +82,3 @@ class User(Base):
         onupdate=datetime.utcnow,
         nullable=False
     )
-
