@@ -27,7 +27,7 @@ if not DATABASE_URL:
 # Create database engine
 engine = create_async_engine(
     DATABASE_URL,
-    echo=True
+    echo=False
 )
 
 
