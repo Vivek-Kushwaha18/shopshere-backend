@@ -1,4 +1,4 @@
-#!/home/vivek/projects/backend/venv/bin/python
+#!/home/vivek/projects/shopshere/backend/venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys
