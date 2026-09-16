@@ -24,7 +24,7 @@ async def create_product(
         name=data.name,
         description=data.description,
         price=data.price,
-        stock=data.stock,
+        quantity=data.quantity,
         category=data.category,
         image_url=data.image_url
     )
@@ -41,7 +41,7 @@ async def create_product(
             "name": product.name,
             "description": product.description,
             "price": product.price,
-            "stock": product.stock,
+            "quantity": product.quantity,
             "category": product.category,
             "image_url": product.image_url
         }
@@ -118,8 +118,8 @@ async def update_product(
     if data.price is not None:
         product.price = data.price
 
-    if data.stock is not None:
-        product.stock = data.stock
+    if data.quantity is not None:
+        product.quantity = data.quantity
 
     if data.category is not None:
         product.category = data.category

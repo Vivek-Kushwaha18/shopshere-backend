@@ -16,7 +16,12 @@ class Product(Base):
     )
 
     name: Mapped[str] = mapped_column(
-        String(150),
+        String(200),
+        nullable=False
+    )
+
+    description: Mapped[str] = mapped_column(
+        Text,
         nullable=False
     )
 
@@ -25,20 +30,14 @@ class Product(Base):
         nullable=False
     )
 
-    description: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True
-    )
-
-    stock: Mapped[int] = mapped_column(
+    quantity: Mapped[int] = mapped_column(
         Integer,
-        default=0,
         nullable=False
     )
 
     category: Mapped[str] = mapped_column(
         String(100),
-        nullable=True
+        nullable=False
     )
 
     image_url: Mapped[str | None] = mapped_column(

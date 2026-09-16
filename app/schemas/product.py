@@ -14,7 +14,7 @@ class ProductCreate(BaseModel):
         gt=0
     )
 
-    stock: int = Field(
+    quantity: int = Field(
         ge=0
     )
 
@@ -41,7 +41,7 @@ class ProductUpdate(BaseModel):
         gt=0
     )
 
-    stock: int | None = Field(
+    quantity: int | None = Field(
         default=None,
         ge=0
     )

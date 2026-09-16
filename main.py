@@ -5,8 +5,8 @@ import os
 
 # For APIs
 from app.api.auth import router as auth_router
-from app.api.products import router as products_router
-
+from app.api.product import router as product_router
+from app.api.order import router as order_router
 # For database
 from app.database.database import engine
 
@@ -14,7 +14,7 @@ from app.database.database import engine
 from app.models.base import Base
 from app.models.user import User
 from app.models.product import Product
-
+from app.models.order import Order
 
 app = FastAPI(
     title="ShopShere API",
@@ -49,9 +49,8 @@ app.add_middleware(
 # =========================
 
 app.include_router(auth_router)
-app.include_router(products_router)
-
-
+app.include_router(product_router)
+app.include_router(order_router)
 # =========================
 # DATABASE
 # =========================

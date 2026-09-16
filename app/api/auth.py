@@ -185,7 +185,7 @@ async def get_me(
     return {
         "status": 201,
         "success": True,
-        "data": user_data,
+        "data": user,
         "message": "Me successfully"
     }
 
