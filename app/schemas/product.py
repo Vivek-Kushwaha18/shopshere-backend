@@ -23,8 +23,6 @@ class ProductCreate(BaseModel):
         max_length=100
     )
 
-    image_url: str | None = None
-
 
 class ProductUpdate(BaseModel):
 
@@ -51,5 +49,3 @@ class ProductUpdate(BaseModel):
         min_length=2,
         max_length=100
     )
-
-    image_url: str | None = None

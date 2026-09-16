@@ -1,10 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException
+import os
+import uuid
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    UploadFile,
+    File,
+    Form,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.database import get_db
 from app.models.product import Product
-from app.schemas.product import ProductCreate, ProductUpdate
+from app.models.product_image import ProductImage
 
 
 router = APIRouter(
@@ -13,23 +23,76 @@ router = APIRouter(
 )
 
 
+# Upload folder
+UPLOAD_DIR = "uploads/products"
+
+os.makedirs(
+    UPLOAD_DIR,
+    exist_ok=True
+)
+
+
 # CREATE PRODUCT
 @router.post("/")
 async def create_product(
-    data: ProductCreate,
+    name: str = Form(...),
+    description: str = Form(""),
+    price: int = Form(...),
+    quantity: int = Form(...),
+    category: str = Form(...),
+    images: list[UploadFile] = File(default=[]),
     db: AsyncSession = Depends(get_db)
 ):
 
+    # Create product
     product = Product(
-        name=data.name,
-        description=data.description,
-        price=data.price,
-        quantity=data.quantity,
-        category=data.category,
-        image_url=data.image_url
+        name=name,
+        description=description,
+        price=price,
+        quantity=quantity,
+        category=category
     )
 
     db.add(product)
+
+    await db.flush()
+
+    # Save multiple images
+    saved_images = []
+
+    for image in images:
+
+        if not image.content_type or not image.content_type.startswith("image/"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{image.filename} is not a valid image"
+            )
+
+        file_extension = os.path.splitext(
+            image.filename
+        )[1]
+
+        file_name = f"{uuid.uuid4()}{file_extension}"
+
+        file_path = os.path.join(
+            UPLOAD_DIR,
+            file_name
+        )
+
+        with open(file_path, "wb") as buffer:
+            content = await image.read()
+            buffer.write(content)
+
+        image_url = f"/uploads/products/{file_name}"
+
+        product_image = ProductImage(
+            product_id=product.id,
+            image_url=image_url
+        )
+
+        db.add(product_image)
+
+        saved_images.append(image_url)
 
     await db.commit()
     await db.refresh(product)
@@ -43,7 +106,7 @@ async def create_product(
             "price": product.price,
             "quantity": product.quantity,
             "category": product.category,
-            "image_url": product.image_url
+            "images": saved_images
         }
     }
 
@@ -62,7 +125,33 @@ async def get_products(
 
     products = result.scalars().all()
 
-    return products
+    response = []
+
+    for product in products:
+
+        image_result = await db.execute(
+            select(ProductImage)
+            .where(
+                ProductImage.product_id == product.id
+            )
+        )
+
+        images = image_result.scalars().all()
+
+        response.append({
+            "id": product.id,
+            "name": product.name,
+            "description": product.description,
+            "price": product.price,
+            "quantity": product.quantity,
+            "category": product.category,
+            "images": [
+                image.image_url
+                for image in images
+            ]
+        })
+
+    return response
 
 
 # GET SINGLE PRODUCT
@@ -87,14 +176,39 @@ async def get_product(
             detail="Product not found"
         )
 
-    return product
+    image_result = await db.execute(
+        select(ProductImage)
+        .where(
+            ProductImage.product_id == product.id
+        )
+    )
+
+    images = image_result.scalars().all()
+
+    return {
+        "id": product.id,
+        "name": product.name,
+        "description": product.description,
+        "price": product.price,
+        "quantity": product.quantity,
+        "category": product.category,
+        "images": [
+            image.image_url
+            for image in images
+        ]
+    }
 
 
 # UPDATE PRODUCT
 @router.put("/{product_id}")
 async def update_product(
     product_id: int,
-    data: ProductUpdate,
+    name: str | None = Form(None),
+    description: str | None = Form(None),
+    price: int | None = Form(None),
+    quantity: int | None = Form(None),
+    category: str | None = Form(None),
+    images: list[UploadFile] | None = File(None),
     db: AsyncSession = Depends(get_db)
 ):
 
@@ -113,30 +227,75 @@ async def update_product(
             detail="Product not found"
         )
 
-    if data.name is not None:
-        product.name = data.name
+    # Update product fields
+    if name is not None:
+        product.name = name
 
-    if data.description is not None:
-        product.description = data.description
+    if description is not None:
+        product.description = description
 
-    if data.price is not None:
-        product.price = data.price
+    if price is not None:
+        product.price = price
 
-    if data.quantity is not None:
-        product.quantity = data.quantity
+    if quantity is not None:
+        product.quantity = quantity
 
-    if data.category is not None:
-        product.category = data.category
+    if category is not None:
+        product.category = category
 
-    if data.image_url is not None:
-        product.image_url = data.image_url
+    new_images = []
+
+    # Upload new images if provided
+    if images:
+
+        for image in images:
+
+            if not image.content_type or not image.content_type.startswith("image/"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{image.filename} is not a valid image"
+                )
+
+            file_extension = os.path.splitext(
+                image.filename
+            )[1]
+
+            file_name = f"{uuid.uuid4()}{file_extension}"
+
+            file_path = os.path.join(
+                UPLOAD_DIR,
+                file_name
+            )
+
+            with open(file_path, "wb") as buffer:
+                content = await image.read()
+                buffer.write(content)
+
+            image_url = f"/uploads/products/{file_name}"
+
+            product_image = ProductImage(
+                product_id=product.id,
+                image_url=image_url
+            )
+
+            db.add(product_image)
+
+            new_images.append(image_url)
 
     await db.commit()
     await db.refresh(product)
 
     return {
         "message": "Product updated successfully",
-        "product": product
+        "product": {
+            "id": product.id,
+            "name": product.name,
+            "description": product.description,
+            "price": product.price,
+            "quantity": product.quantity,
+            "category": product.category,
+            "new_images": new_images
+        }
     }
 
 
@@ -162,6 +321,7 @@ async def delete_product(
             detail="Product not found"
         )
 
+    # Soft delete
     product.is_deleted = True
 
     await db.commit()
