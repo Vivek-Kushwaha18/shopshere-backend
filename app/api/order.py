@@ -46,6 +46,7 @@ async def get_orders(
 ):
     result = await db.execute(
         select(Order)
+        .where(Order.is_deleted == False)
     )
 
     orders = result.scalars().all()
@@ -64,7 +65,10 @@ async def get_order(
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
-        select(Order).where(Order.id == order_id)
+        select(Order).where(
+            Order.id == order_id,
+            Order.is_deleted == False
+        )
     )
 
     order = result.scalar_one_or_none()
@@ -90,7 +94,10 @@ async def update_order(
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
-        select(Order).where(Order.id == order_id)
+        select(Order).where(
+            Order.id == order_id,
+            Order.is_deleted == False
+        )
     )
 
     order = result.scalar_one_or_none()
@@ -124,7 +131,10 @@ async def delete_order(
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
-        select(Order).where(Order.id == order_id)
+        select(Order).where(
+            Order.id == order_id,
+            Order.is_deleted == False
+        )
     )
 
     order = result.scalar_one_or_none()
@@ -135,8 +145,10 @@ async def delete_order(
             detail="Order not found"
         )
 
-    await db.delete(order)
+    order.is_deleted = True
+
     await db.commit()
+    await db.refresh(order)
 
     return {
         "success": True,

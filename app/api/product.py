@@ -55,7 +55,9 @@ async def get_products(
 ):
 
     result = await db.execute(
-        select(Product).order_by(Product.id.desc())
+        select(Product)
+        .where(Product.is_deleted == False)
+        .order_by(Product.id.desc())
     )
 
     products = result.scalars().all()
@@ -72,7 +74,8 @@ async def get_product(
 
     result = await db.execute(
         select(Product).where(
-            Product.id == product_id
+            Product.id == product_id,
+            Product.is_deleted == False
         )
     )
 
@@ -97,7 +100,8 @@ async def update_product(
 
     result = await db.execute(
         select(Product).where(
-            Product.id == product_id
+            Product.id == product_id,
+            Product.is_deleted == False
         )
     )
 
@@ -145,7 +149,8 @@ async def delete_product(
 
     result = await db.execute(
         select(Product).where(
-            Product.id == product_id
+            Product.id == product_id,
+            Product.is_deleted == False
         )
     )
 
@@ -157,9 +162,10 @@ async def delete_product(
             detail="Product not found"
         )
 
-    await db.delete(product)
+    product.is_deleted = True
 
     await db.commit()
+    await db.refresh(product)
 
     return {
         "message": "Product deleted successfully",

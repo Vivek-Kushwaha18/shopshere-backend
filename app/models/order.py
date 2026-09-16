@@ -1,6 +1,5 @@
-from sqlalchemy import Column, Integer, ForeignKey, Float, String
+from sqlalchemy import Column, Integer, ForeignKey, Float, String, Boolean
 from app.models.base import Base
-
 
 
 class Order(Base):
@@ -17,3 +16,9 @@ class Order(Base):
     total_price = Column(Float, nullable=False)
 
     status = Column(String, default="pending")
+
+    is_deleted = Column(
+        Boolean,
+        default=False,
+        nullable=False
+    )

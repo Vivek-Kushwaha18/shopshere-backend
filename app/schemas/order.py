@@ -15,7 +15,7 @@ class OrderCreate(BaseModel):
         gt=0
     )
 
-    total_price: int = Field(
+    total_price: float = Field(
         gt=0
     )
 
