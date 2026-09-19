@@ -1,51 +1,26 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict
 
 
 class ProductCreate(BaseModel):
-
-    name: str = Field(
-        min_length=2,
-        max_length=150
-    )
-
+    name: str
     description: str | None = None
-
-    price: int = Field(
-        gt=0
-    )
-
-    quantity: int = Field(
-        ge=0
-    )
-
-    category: str = Field(
-        min_length=2,
-        max_length=100
-    )
+    price: float
+    original_price: float | None = None
+    stock: int = 0
+    image: str | None = None
+    category_id: int
 
 
-class ProductUpdate(BaseModel):
-
-    name: str | None = Field(
-        default=None,
-        min_length=2,
-        max_length=150
-    )
-
+class ProductResponse(BaseModel):
+    id: int
+    name: str
     description: str | None = None
+    price: float
+    original_price: float | None = None
+    stock: int
+    image: str | None = None
+    rating: float
+    reviews_count: int
+    category_id: int
 
-    price: int | None = Field(
-        default=None,
-        gt=0
-    )
-
-    quantity: int | None = Field(
-        default=None,
-        ge=0
-    )
-
-    category: str | None = Field(
-        default=None,
-        min_length=2,
-        max_length=100
-    )
+    model_config = ConfigDict(from_attributes=True)

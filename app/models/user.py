@@ -1,4 +1,3 @@
-
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String
@@ -10,75 +9,75 @@ from app.models.base import Base
 class User(Base):
     __tablename__ = "users"
 
-    # User ID
     id: Mapped[int] = mapped_column(
         primary_key=True,
-        autoincrement=True
+        index=True,
     )
 
-    # User information
     full_name: Mapped[str] = mapped_column(
         String(100),
-        nullable=False
+        nullable=False,
     )
 
     email: Mapped[str] = mapped_column(
-        String(150),
+        String(255),
         unique=True,
+        index=True,
         nullable=False,
-        index=True
     )
 
     phone: Mapped[str | None] = mapped_column(
         String(20),
-        nullable=True
+        nullable=True,
     )
 
-    # Authentication
     password_hash: Mapped[str] = mapped_column(
         String(255),
-        nullable=False
-    )
-
-    is_email_verified: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        nullable=False
+        nullable=False,
     )
 
     role: Mapped[str] = mapped_column(
         String(20),
         default="customer",
-        nullable=False
+        nullable=False,
     )
 
-    auth_provider: Mapped[str] = mapped_column(
-        String(20),
-        default="email",
-        nullable=False
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
     )
 
-    # Forgot Password
+    is_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    # Refresh token
+    refresh_token: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+    # Forgot-password token
     reset_token: Mapped[str | None] = mapped_column(
         String(255),
-        nullable=True
+        nullable=True,
     )
 
     reset_token_expires: Mapped[datetime | None] = mapped_column(
-        DateTime,
-        nullable=True
+        DateTime(timezone=True),
+        nullable=True,
     )
 
-    # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
-        nullable=False
+    # Email verification code
+    verification_code: Mapped[str | None] = mapped_column(
+        String(10),
+        nullable=True,
     )
 
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
-        nullable=False
+    verification_code_expires: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )

@@ -1,54 +1,41 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import os
 
-# For APIs
-from app.api.auth import router as auth_router
-from app.api.product import router as product_router
-from app.api.order import router as order_router
-
-# For database
 from app.database.database import engine
 
-# For models
 from app.models.base import Base
 from app.models.user import User
+from app.models.category import Category
 from app.models.product import Product
-from app.models.order import Order
-from app.models.product_image import ProductImage
+
+from app.api.category import router as category_router
+from app.api.product import router as product_router
+from app.api.auth import router as auth_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            Base.metadata.create_all
+        )
+
+    yield
 
 
 app = FastAPI(
-    title="ShopShere API",
+    title="ShopSphere API",
+    description="AI-Powered Multi-Vendor E-Commerce Platform API",
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
-
-# =========================
-# UPLOADS
-# =========================
-
-app.mount(
-    "/uploads",
-    StaticFiles(directory="uploads"),
-    name="uploads"
-)
-
-
-# =========================
-# CORS
-# =========================
-
-FRONTEND_URL = os.getenv(
-    "FRONTEND_URL",
-    "http://localhost:3000"
-)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        FRONTEND_URL,
-        "https://shopshere-frontend-theta.vercel.app",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ],
@@ -58,35 +45,20 @@ app.add_middleware(
 )
 
 
-# =========================
-# API ROUTES
-# =========================
-
-app.include_router(auth_router)
+app.include_router(category_router)
 app.include_router(product_router)
-app.include_router(order_router)
+app.include_router(auth_router)
 
-
-# =========================
-# DATABASE
-# =========================
-
-@app.on_event("startup")
-async def create_tables():
-
-    async with engine.begin() as connection:
-
-        await connection.run_sync(
-            Base.metadata.create_all
-        )
-
-
-# =========================
-# ROOT API
-# =========================
 
 @app.get("/")
 async def root():
     return {
         "message": "ShopSphere API is running"
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy"
     }
