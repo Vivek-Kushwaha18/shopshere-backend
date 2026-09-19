@@ -111,11 +111,19 @@ def decode_access_token(
 ) -> dict:
 
     try:
+
         payload = jwt.decode(
             token,
             JWT_SECRET_KEY,
             algorithms=[JWT_ALGORITHM],
         )
+
+        token_type = payload.get("type")
+
+        if token_type != "access":
+            raise JWTError(
+                "Invalid access token"
+            )
 
         user_id = payload.get("sub")
 
