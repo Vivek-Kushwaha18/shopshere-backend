@@ -33,19 +33,11 @@ app = FastAPI(
 )
 
 
-# --------------------------------------------------
-# CORS
-# --------------------------------------------------
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        # Local frontend
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-
-        # Production frontend
-        "https://shopshere-frontend-theta.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -53,18 +45,10 @@ app.add_middleware(
 )
 
 
-# --------------------------------------------------
-# API ROUTERS
-# --------------------------------------------------
-
 app.include_router(category_router)
 app.include_router(product_router)
 app.include_router(auth_router)
 
-
-# --------------------------------------------------
-# ROOT
-# --------------------------------------------------
 
 @app.get("/")
 async def root():
@@ -73,12 +57,8 @@ async def root():
     }
 
 
-# --------------------------------------------------
-# HEALTH CHECK
-# --------------------------------------------------
-
 @app.get("/health")
 async def health():
     return {
         "status": "healthy"
-    }
+    } 
