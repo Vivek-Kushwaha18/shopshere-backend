@@ -495,50 +495,50 @@ async def update_profile(
 # CHANGE PASSWORD
 # =========================================================
 
-@router.post(
-    "/change-password",
-)
-async def change_password(
-    password_data: ChangePasswordRequest,
-    current_user: User = Depends(
-        get_current_user
-    ),
-    db: AsyncSession = Depends(get_db),
-):
+# @router.post(
+#     "/change-password",
+# )
+# async def change_password(
+#     password_data: ChangePasswordRequest,
+#     current_user: User = Depends(
+#         get_current_user
+#     ),
+#     db: AsyncSession = Depends(get_db),
+# ):
 
-    password_is_correct = password_hash.verify(
-        password_data.current_password,
-        current_user.password_hash,
-    )
+#     password_is_correct = password_hash.verify(
+#         password_data.current_password,
+#         current_user.password_hash,
+#     )
 
-    if not password_is_correct:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect",
-        )
+#     if not password_is_correct:
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Current password is incorrect",
+#         )
 
-    if (
-        password_data.current_password
-        == password_data.new_password
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must be different",
-        )
+#     if (
+#         password_data.current_password
+#         == password_data.new_password
+#     ):
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="New password must be different",
+#         )
 
-    current_user.password_hash = (
-        password_hash.hash(
-            password_data.new_password
-        )
-    )
+#     current_user.password_hash = (
+#         password_hash.hash(
+#             password_data.new_password
+#         )
+#     )
 
-    current_user.refresh_token = None
+#     current_user.refresh_token = None
 
-    await db.commit()
+#     await db.commit()
 
-    return {
-        "message": "Password changed successfully"
-    }
+#     return {
+#         "message": "Password changed successfully"
+#     }
 
 
 # =========================================================
