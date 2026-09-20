@@ -557,17 +557,36 @@ async def verify_email(
     # CHECK OTP EXPIRY
     # =====================================================
 
-    if (
-        user.verification_code_expires is None
-        or user.verification_code_expires
-        < datetime.now(timezone.utc)
-    ):
+    # if (
+    #     user.verification_code_expires is None
+    #     or user.verification_code_expires
+    #     < datetime.now(timezone.utc)
+    # ):
 
+    #     raise HTTPException(
+    #         status_code=status.HTTP_400_BAD_REQUEST,
+    #         detail="Verification code has expired",
+    #     )
+    expires_at = user.verification_code_expires
+
+    if expires_at is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Verification code has expired",
         )
 
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(
+            tzinfo=timezone.utc
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if expires_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code has expired",
+        )
     # =====================================================
     # VERIFY EMAIL
     # =====================================================
@@ -1018,6 +1037,110 @@ ShopSphere Team
 # RESET PASSWORD
 # =========================================================
 
+# @router.post(
+#     "/reset-password",
+# )
+# async def reset_password(
+#     request: ResetPasswordRequest,
+#     db: AsyncSession = Depends(get_db),
+# ):
+
+#     # =====================================================
+#     # CLEAN TOKEN
+#     # =====================================================
+
+#     reset_token = request.token.strip()
+
+#     if not reset_token:
+
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Reset token is missing",
+#         )
+
+#     # =====================================================
+#     # FIND USER
+#     # =====================================================
+
+#     result = await db.execute(
+#         select(User).where(
+#             User.reset_token == reset_token
+#         )
+#     )
+
+#     user = result.scalar_one_or_none()
+
+#     # =====================================================
+#     # INVALID TOKEN
+#     # =====================================================
+
+#     if user is None:
+
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Invalid reset token",
+#         )
+
+#     # =====================================================
+#     # CHECK TOKEN EXPIRY
+#     # =====================================================
+
+#     if (
+#         user.reset_token_expires is None
+#         or user.reset_token_expires
+#         < datetime.now(timezone.utc)
+#     ):
+
+#         user.reset_token = None
+#         user.reset_token_expires = None
+
+#         await db.commit()
+
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Reset token has expired",
+#         )
+
+#     # =====================================================
+#     # UPDATE PASSWORD
+#     # =====================================================
+
+#     user.password_hash = password_hash.hash(
+#         request.new_password
+#     )
+
+#     # =====================================================
+#     # CLEAR RESET TOKEN
+#     # =====================================================
+
+#     user.reset_token = None
+
+#     user.reset_token_expires = None
+
+#     # =====================================================
+#     # INVALIDATE OLD REFRESH TOKEN
+#     # =====================================================
+
+#     user.refresh_token = None
+
+#     # =====================================================
+#     # SAVE CHANGES
+#     # =====================================================
+
+#     await db.commit()
+
+#     # =====================================================
+#     # RESPONSE
+#     # =====================================================
+
+#     return {
+#         "message": "Password reset successfully"
+#     }
+
+# =========================================================
+# RESET PASSWORD
+# =========================================================
+
 @router.post(
     "/reset-password",
 )
@@ -1033,7 +1156,6 @@ async def reset_password(
     reset_token = request.token.strip()
 
     if not reset_token:
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Reset token is missing",
@@ -1056,7 +1178,6 @@ async def reset_password(
     # =====================================================
 
     if user is None:
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid reset token",
@@ -1066,11 +1187,40 @@ async def reset_password(
     # CHECK TOKEN EXPIRY
     # =====================================================
 
-    if (
-        user.reset_token_expires is None
-        or user.reset_token_expires
-        < datetime.now(timezone.utc)
-    ):
+    expires_at = user.reset_token_expires
+
+    # Token must have an expiry time
+    if expires_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset token has expired",
+        )
+
+    # =====================================================
+    # FIX TIMEZONE DIFFERENCE
+    # =====================================================
+    #
+    # PostgreSQL/Neon can return the datetime as
+    # timezone-naive depending on the column/database setup.
+    #
+    # datetime.now(timezone.utc) is timezone-aware.
+    #
+    # Convert a naive database datetime to UTC-aware
+    # before comparing.
+    # =====================================================
+
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(
+            tzinfo=timezone.utc
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # =====================================================
+    # TOKEN EXPIRED
+    # =====================================================
+
+    if expires_at < now:
 
         user.reset_token = None
         user.reset_token_expires = None
@@ -1095,7 +1245,6 @@ async def reset_password(
     # =====================================================
 
     user.reset_token = None
-
     user.reset_token_expires = None
 
     # =====================================================
