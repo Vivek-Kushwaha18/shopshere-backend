@@ -10,9 +10,9 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 
-# revision identifiers, used by Alembic.
 revision: str = "cb57af972c93"
 down_revision: Union[str, Sequence[str], None] = "ccdc7851b8f6"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -20,97 +20,163 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade database schema."""
+    bind = op.get_bind()
+    inspector = inspect(bind)
 
-    # ---------------------------------------------------------
+    # =========================================================
     # CATEGORIES
-    # ---------------------------------------------------------
+    # =========================================================
 
-    # Add soft-delete column safely.
-    # Existing rows receive False.
-    op.add_column(
-        "categories",
-        sa.Column(
-            "is_deleted",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.false(),
-        ),
-    )
+    category_columns = {
+        column["name"]
+        for column in inspector.get_columns("categories")
+    }
 
-    # ---------------------------------------------------------
+    if "is_deleted" not in category_columns:
+        op.add_column(
+            "categories",
+            sa.Column(
+                "is_deleted",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.false(),
+            ),
+        )
+
+    # =========================================================
     # PRODUCTS
+    # =========================================================
+
+    product_columns = {
+        column["name"]
+        for column in inspector.get_columns("products")
+    }
+
+    # ---------------------------------------------------------
+    # image_url
     # ---------------------------------------------------------
 
-    # New image URL column.
-    op.add_column(
-        "products",
-        sa.Column(
-            "image_url",
-            sa.String(length=500),
-            nullable=True,
-        ),
-    )
+    if "image_url" not in product_columns:
+        op.add_column(
+            "products",
+            sa.Column(
+                "image_url",
+                sa.String(length=500),
+                nullable=True,
+            ),
+        )
 
-    # Add soft-delete column safely.
-    # Existing rows receive False.
-    op.add_column(
-        "products",
-        sa.Column(
-            "is_deleted",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.false(),
-        ),
-    )
+    # ---------------------------------------------------------
+    # is_deleted
+    # ---------------------------------------------------------
 
-    # Add created_at safely.
-    # Existing products receive the current timestamp.
-    op.add_column(
-        "products",
-        sa.Column(
+    if "is_deleted" not in product_columns:
+        op.add_column(
+            "products",
+            sa.Column(
+                "is_deleted",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.false(),
+            ),
+        )
+
+    # ---------------------------------------------------------
+    # created_at
+    # ---------------------------------------------------------
+
+    if "created_at" not in product_columns:
+        op.add_column(
+            "products",
+            sa.Column(
+                "created_at",
+                sa.DateTime(),
+                nullable=True,
+                server_default=sa.func.now(),
+            ),
+        )
+
+    # ---------------------------------------------------------
+    # updated_at
+    # ---------------------------------------------------------
+
+    if "updated_at" not in product_columns:
+        op.add_column(
+            "products",
+            sa.Column(
+                "updated_at",
+                sa.DateTime(),
+                nullable=True,
+                server_default=sa.func.now(),
+            ),
+        )
+
+    # Re-read product columns after possible additions.
+    product_columns = {
+        column["name"]
+        for column in inspector.get_columns("products")
+    }
+
+    # =========================================================
+    # FIX EXISTING NULL TIMESTAMPS
+    # =========================================================
+
+    if "created_at" in product_columns:
+        op.execute(
+            """
+            UPDATE products
+            SET created_at = NOW()
+            WHERE created_at IS NULL
+            """
+        )
+
+        op.alter_column(
+            "products",
             "created_at",
-            sa.DateTime(),
-            nullable=True,
-            server_default=sa.func.now(),
-        ),
-    )
+            nullable=False,
+        )
 
-    # Add updated_at safely.
-    # Existing products receive the current timestamp.
-    op.add_column(
-        "products",
-        sa.Column(
+    if "updated_at" in product_columns:
+        op.execute(
+            """
+            UPDATE products
+            SET updated_at = NOW()
+            WHERE updated_at IS NULL
+            """
+        )
+
+        op.alter_column(
+            "products",
             "updated_at",
-            sa.DateTime(),
-            nullable=True,
-            server_default=sa.func.now(),
-        ),
-    )
-
-    # Make timestamps required after existing rows
-    # have received values.
-    op.alter_column(
-        "products",
-        "created_at",
-        nullable=False,
-    )
-
-    op.alter_column(
-        "products",
-        "updated_at",
-        nullable=False,
-    )
+            nullable=False,
+        )
 
 
 def downgrade() -> None:
-    """Downgrade database schema."""
+    bind = op.get_bind()
+    inspector = inspect(bind)
 
-    # Remove product columns added by this migration.
-    op.drop_column("products", "updated_at")
-    op.drop_column("products", "created_at")
-    op.drop_column("products", "is_deleted")
-    op.drop_column("products", "image_url")
+    product_columns = {
+        column["name"]
+        for column in inspector.get_columns("products")
+    }
 
-    # Remove category soft-delete column.
-    op.drop_column("categories", "is_deleted")
+    category_columns = {
+        column["name"]
+        for column in inspector.get_columns("categories")
+    }
+
+    if "updated_at" in product_columns:
+        op.drop_column("products", "updated_at")
+
+    if "created_at" in product_columns:
+        op.drop_column("products", "created_at")
+
+    if "is_deleted" in product_columns:
+        op.drop_column("products", "is_deleted")
+
+    if "image_url" in product_columns:
+        op.drop_column("products", "image_url")
+
+    if "is_deleted" in category_columns:
+        op.drop_column("categories", "is_deleted")
