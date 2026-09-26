@@ -9,3 +9,6 @@ python-multipart>=0.0.9,<1.0
 pwdlib[argon2]>=0.2,<1.0
 aiosmtplib>=3.0,<4.0
 python-jose[cryptography]
+boto3
+python-multipart
+

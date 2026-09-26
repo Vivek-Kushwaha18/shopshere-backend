@@ -1,16 +1,35 @@
-from pydantic import BaseModel, ConfigDict
+from datetime import datetime
+
+from pydantic import BaseModel, Field
 
 
 class CategoryCreate(BaseModel):
-    name: str
+    name: str = Field(
+        ...,
+        min_length=2,
+        max_length=100,
+    )
+
+    description: str | None = None
+
+
+class CategoryUpdate(BaseModel):
+    name: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=100,
+    )
+
     description: str | None = None
 
 
 class CategoryResponse(BaseModel):
     id: int
     name: str
-    description: str | None = None
+    description: str | None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
-
- 
+    class Config:
+        from_attributes = True

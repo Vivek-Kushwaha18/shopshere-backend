@@ -271,9 +271,13 @@ ShopSphere Team
         return {
             "message": "Account created. Verification code sent.",
             "user": {
+                "id": existing_user.id,
                 "full_name": existing_user.full_name,
                 "email": existing_user.email,
+                "phone": existing_user.phone,
                 "role": existing_user.role,
+                "is_active": existing_user.is_active,
+                "is_verified": existing_user.is_verified,
             },
         }
 
@@ -360,9 +364,13 @@ ShopSphere Team
     return {
         "message": "Account created. Verification code sent.",
         "user": {
+            "id": user.id,
             "full_name": user.full_name,
             "email": user.email,
+            "phone": user.phone,
             "role": user.role,
+            "is_active": user.is_active,
+            "is_verified": user.is_verified,
         },
     }
 
@@ -415,9 +423,13 @@ async def send_verification_code(
             "message": "Email is already verified",
             "is_verified": True,
             "user": {
+                "id": user.id,
                 "full_name": user.full_name,
                 "email": user.email,
+                "phone": user.phone,
                 "role": user.role,
+                "is_active": user.is_active,
+                "is_verified": user.is_verified,
             },
         }
 
@@ -520,9 +532,13 @@ async def verify_email(
             "message": "Email is already verified",
             "is_verified": True,
             "user": {
+                "id": user.id,
                 "full_name": user.full_name,
                 "email": user.email,
+                "phone": user.phone,
                 "role": user.role,
+                "is_active": user.is_active,
+                "is_verified": user.is_verified,
             },
         }
 
@@ -557,19 +573,12 @@ async def verify_email(
     # CHECK OTP EXPIRY
     # =====================================================
 
-    # if (
-    #     user.verification_code_expires is None
-    #     or user.verification_code_expires
-    #     < datetime.now(timezone.utc)
-    # ):
-
-    #     raise HTTPException(
-    #         status_code=status.HTTP_400_BAD_REQUEST,
-    #         detail="Verification code has expired",
-    #     )
-    expires_at = user.verification_code_expires
+    expires_at = (
+        user.verification_code_expires
+    )
 
     if expires_at is None:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Verification code has expired",
@@ -583,10 +592,12 @@ async def verify_email(
     now = datetime.now(timezone.utc)
 
     if expires_at < now:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Verification code has expired",
         )
+
     # =====================================================
     # VERIFY EMAIL
     # =====================================================
@@ -602,22 +613,23 @@ async def verify_email(
 
     # =====================================================
     # IMPORTANT
-    # NO ACCESS TOKEN
-    # NO REFRESH TOKEN
     #
-    # RETURN ONLY:
-    # full_name
-    # email
-    # role
+    # Verification does NOT create tokens.
+    #
+    # User must login after verification.
     # =====================================================
 
     return {
         "message": "Email verified successfully",
         "is_verified": True,
         "user": {
+            "id": user.id,
             "full_name": user.full_name,
             "email": user.email,
+            "phone": user.phone,
             "role": user.role,
+            "is_active": user.is_active,
+            "is_verified": user.is_verified,
         },
     }
 
@@ -649,7 +661,7 @@ async def login(
     )
 
     user = result.scalar_one_or_none()
-
+    
     if user is None:
 
         raise HTTPException(
@@ -701,6 +713,21 @@ async def login(
         )
 
     # =====================================================
+    # CHECK ROLE
+    # =====================================================
+
+    if user.role not in {
+        "customer",
+        "seller",
+        "admin",
+    }:
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid user role",
+        )
+
+    # =====================================================
     # CREATE ACCESS TOKEN
     # =====================================================
 
@@ -730,9 +757,7 @@ async def login(
     # =====================================================
     # LOGIN RESPONSE
     #
-    # LOGIN = REAL AUTHENTICATION
-    #
-    # TOKENS + USER INFO
+    # Frontend needs role for dashboard redirect.
     # =====================================================
 
     return {
@@ -740,9 +765,13 @@ async def login(
         "refresh_token": refresh_token,
         "token_type": "bearer",
         "user": {
+            "id": user.id,
             "full_name": user.full_name,
             "email": user.email,
+            "phone": user.phone,
             "role": user.role,
+            "is_active": user.is_active,
+            "is_verified": user.is_verified,
         },
     }
 
@@ -767,7 +796,9 @@ async def refresh_token(
 
     try:
 
-        payload = decode_refresh_token(token)
+        payload = decode_refresh_token(
+            token
+        )
 
         user_id = payload.get("sub")
 
@@ -841,7 +872,7 @@ async def refresh_token(
         )
 
     # =====================================================
-    # CHECK EMAIL VERIFIED
+    # CHECK VERIFIED
     # =====================================================
 
     if user.is_verified is not True:
@@ -849,6 +880,21 @@ async def refresh_token(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email is not verified",
+        )
+
+    # =====================================================
+    # CHECK ROLE
+    # =====================================================
+
+    if user.role not in {
+        "customer",
+        "seller",
+        "admin",
+    }:
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid user role",
         )
 
     # =====================================================
@@ -873,7 +919,9 @@ async def refresh_token(
     # ROTATE REFRESH TOKEN
     # =====================================================
 
-    user.refresh_token = new_refresh_token
+    user.refresh_token = (
+        new_refresh_token
+    )
 
     await db.commit()
     await db.refresh(user)
@@ -887,9 +935,13 @@ async def refresh_token(
         "refresh_token": new_refresh_token,
         "token_type": "bearer",
         "user": {
+            "id": user.id,
             "full_name": user.full_name,
             "email": user.email,
+            "phone": user.phone,
             "role": user.role,
+            "is_active": user.is_active,
+            "is_verified": user.is_verified,
         },
     }
 
@@ -960,7 +1012,7 @@ async def forgot_password(
     await db.commit()
 
     # =====================================================
-    # GET FRONTEND URL
+    # FRONTEND URL
     # =====================================================
 
     frontend_url = os.getenv(
@@ -1037,110 +1089,6 @@ ShopSphere Team
 # RESET PASSWORD
 # =========================================================
 
-# @router.post(
-#     "/reset-password",
-# )
-# async def reset_password(
-#     request: ResetPasswordRequest,
-#     db: AsyncSession = Depends(get_db),
-# ):
-
-#     # =====================================================
-#     # CLEAN TOKEN
-#     # =====================================================
-
-#     reset_token = request.token.strip()
-
-#     if not reset_token:
-
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Reset token is missing",
-#         )
-
-#     # =====================================================
-#     # FIND USER
-#     # =====================================================
-
-#     result = await db.execute(
-#         select(User).where(
-#             User.reset_token == reset_token
-#         )
-#     )
-
-#     user = result.scalar_one_or_none()
-
-#     # =====================================================
-#     # INVALID TOKEN
-#     # =====================================================
-
-#     if user is None:
-
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Invalid reset token",
-#         )
-
-#     # =====================================================
-#     # CHECK TOKEN EXPIRY
-#     # =====================================================
-
-#     if (
-#         user.reset_token_expires is None
-#         or user.reset_token_expires
-#         < datetime.now(timezone.utc)
-#     ):
-
-#         user.reset_token = None
-#         user.reset_token_expires = None
-
-#         await db.commit()
-
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Reset token has expired",
-#         )
-
-#     # =====================================================
-#     # UPDATE PASSWORD
-#     # =====================================================
-
-#     user.password_hash = password_hash.hash(
-#         request.new_password
-#     )
-
-#     # =====================================================
-#     # CLEAR RESET TOKEN
-#     # =====================================================
-
-#     user.reset_token = None
-
-#     user.reset_token_expires = None
-
-#     # =====================================================
-#     # INVALIDATE OLD REFRESH TOKEN
-#     # =====================================================
-
-#     user.refresh_token = None
-
-#     # =====================================================
-#     # SAVE CHANGES
-#     # =====================================================
-
-#     await db.commit()
-
-#     # =====================================================
-#     # RESPONSE
-#     # =====================================================
-
-#     return {
-#         "message": "Password reset successfully"
-#     }
-
-# =========================================================
-# RESET PASSWORD
-# =========================================================
-
 @router.post(
     "/reset-password",
 )
@@ -1156,6 +1104,7 @@ async def reset_password(
     reset_token = request.token.strip()
 
     if not reset_token:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Reset token is missing",
@@ -1178,6 +1127,7 @@ async def reset_password(
     # =====================================================
 
     if user is None:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid reset token",
@@ -1187,10 +1137,12 @@ async def reset_password(
     # CHECK TOKEN EXPIRY
     # =====================================================
 
-    expires_at = user.reset_token_expires
+    expires_at = (
+        user.reset_token_expires
+    )
 
-    # Token must have an expiry time
     if expires_at is None:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Reset token has expired",
@@ -1199,17 +1151,9 @@ async def reset_password(
     # =====================================================
     # FIX TIMEZONE DIFFERENCE
     # =====================================================
-    #
-    # PostgreSQL/Neon can return the datetime as
-    # timezone-naive depending on the column/database setup.
-    #
-    # datetime.now(timezone.utc) is timezone-aware.
-    #
-    # Convert a naive database datetime to UTC-aware
-    # before comparing.
-    # =====================================================
 
     if expires_at.tzinfo is None:
+
         expires_at = expires_at.replace(
             tzinfo=timezone.utc
         )
@@ -1223,6 +1167,7 @@ async def reset_password(
     if expires_at < now:
 
         user.reset_token = None
+
         user.reset_token_expires = None
 
         await db.commit()
@@ -1245,6 +1190,7 @@ async def reset_password(
     # =====================================================
 
     user.reset_token = None
+
     user.reset_token_expires = None
 
     # =====================================================

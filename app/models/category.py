@@ -1,12 +1,9 @@
-from typing import TYPE_CHECKING
+from datetime import datetime
 
-from sqlalchemy import String
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, DateTime, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
-
-if TYPE_CHECKING:
-    from app.models.product import Product
 
 
 class Category(Base):
@@ -20,18 +17,30 @@ class Category(Base):
     name: Mapped[str] = mapped_column(
         String(100),
         unique=True,
-        index=True,
         nullable=False,
+        index=True,
     )
 
     description: Mapped[str | None] = mapped_column(
-        String(500),
+        Text,
         nullable=True,
     )
 
-    products: Mapped[list["Product"]] = relationship(
-        back_populates="category",
-        cascade="all, delete-orphan",
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
     )
 
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
 
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
