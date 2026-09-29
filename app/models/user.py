@@ -87,3 +87,25 @@ class User(Base):
     products: Mapped[list["Product"]] = relationship(
         back_populates="seller",
     )
+
+#================================================================
+
+    gender: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+
+    pending_email: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    email_change_code: Mapped[str | None] = mapped_column(
+        String(10),
+        nullable=True,
+    )
+
+    email_change_code_expires: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )

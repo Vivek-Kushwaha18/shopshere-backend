@@ -90,7 +90,7 @@ class ResetPasswordRequest(BaseModel):
 
 # =========================================================
 # USER RESPONSE
-# ONLY 3 USER INFORMATION FIELDS
+# USED BY AUTHENTICATION
 # =========================================================
 
 class UserResponse(BaseModel):
@@ -108,3 +108,125 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str
     user: UserResponse
+
+
+# =========================================================
+# PROFILE RESPONSE
+# =========================================================
+
+class ProfileResponse(BaseModel):
+    full_name: str
+    email: EmailStr
+    phone: str | None = None
+
+    gender: Literal[
+        "male",
+        "female",
+        "other",
+        "prefer_not_to_say",
+    ] | None = None
+
+    role: str
+    is_active: bool
+    is_verified: bool
+
+
+# =========================================================
+# PROFILE UPDATE
+# FULL NAME + PHONE + GENDER
+#
+# EMAIL IS NOT UPDATED HERE.
+# EMAIL HAS A SEPARATE OTP FLOW.
+# =========================================================
+
+class ProfileUpdateRequest(BaseModel):
+    full_name: str = Field(
+        min_length=2,
+        max_length=100,
+    )
+
+    phone: str | None = Field(
+        default=None,
+        max_length=20,
+    )
+
+    gender: Literal[
+        "male",
+        "female",
+        "other",
+        "prefer_not_to_say",
+    ] | None = None
+
+
+# =========================================================
+# CHANGE EMAIL
+# =========================================================
+
+class ChangeEmailRequest(BaseModel):
+    new_email: EmailStr
+
+
+# =========================================================
+# VERIFY EMAIL CHANGE
+# =========================================================
+
+class VerifyEmailChangeRequest(BaseModel):
+    code: str = Field(
+        min_length=6,
+        max_length=6,
+        pattern=r"^\d{6}$",
+    )
+
+
+# =========================================================
+# ADMIN - UPDATE USER
+# =========================================================
+
+class AdminUserUpdateRequest(BaseModel):
+    full_name: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=100,
+    )
+
+    phone: str | None = Field(
+        default=None,
+        max_length=20,
+    )
+
+    gender: Literal[
+        "male",
+        "female",
+        "other",
+        "prefer_not_to_say",
+    ] | None = None
+
+    role: Literal[
+        "customer",
+        "seller",
+        "admin",
+    ] | None = None
+
+    is_active: bool | None = None
+
+
+# =========================================================
+# ADMIN - USER RESPONSE
+# =========================================================
+
+class AdminUserResponse(BaseModel):
+    id: int
+    full_name: str
+    email: EmailStr
+    phone: str | None = None
+
+    gender: Literal[
+        "male",
+        "female",
+        "other",
+        "prefer_not_to_say",
+    ] | None = None
+
+    role: str
+    is_active: bool
+    is_verified: bool

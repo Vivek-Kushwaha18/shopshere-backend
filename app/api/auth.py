@@ -16,7 +16,7 @@ from fastapi.security import (
 
 from pwdlib import PasswordHash
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import (
@@ -33,12 +33,20 @@ from app.database.database import get_db
 from app.models.user import User
 
 from app.schemas.auth import (
+    AdminUserResponse,
+    AdminUserUpdateRequest,
+    ChangeEmailRequest,
     ForgotPasswordRequest,
     LoginRequest,
+    ProfileResponse,
+    ProfileUpdateRequest,
     RefreshTokenRequest,
     ResetPasswordRequest,
     SendVerificationCodeRequest,
     SignupRequest,
+    TokenResponse,
+    UserResponse,
+    VerifyEmailChangeRequest,
     VerifyEmailRequest,
 )
 
@@ -661,7 +669,7 @@ async def login(
     )
 
     user = result.scalar_one_or_none()
-    
+
     if user is None:
 
         raise HTTPException(
@@ -756,8 +764,6 @@ async def login(
 
     # =====================================================
     # LOGIN RESPONSE
-    #
-    # Frontend needs role for dashboard redirect.
     # =====================================================
 
     return {
@@ -1211,4 +1217,647 @@ async def reset_password(
 
     return {
         "message": "Password reset successfully"
+    }
+
+
+# =========================================================
+# GET MY PROFILE
+# =========================================================
+
+@router.get(
+    "/me",
+    response_model=ProfileResponse,
+)
+async def get_my_profile(
+    current_user: User = Depends(get_current_user),
+):
+    return {
+        "full_name": current_user.full_name,
+        "email": current_user.email,
+        "phone": current_user.phone,
+        "gender": current_user.gender,
+        "role": current_user.role,
+        "is_active": current_user.is_active,
+        "is_verified": current_user.is_verified,
+    }
+
+
+# =========================================================
+# UPDATE MY PROFILE
+#
+# EMAIL IS NOT UPDATED HERE.
+# PASSWORD IS NOT UPDATED HERE.
+# =========================================================
+
+@router.put(
+    "/update-profile",
+    response_model=ProfileResponse,
+)
+async def update_profile(
+    profile_data: ProfileUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+
+    current_user.full_name = (
+        profile_data.full_name.strip()
+    )
+
+    current_user.phone = (
+        profile_data.phone.strip()
+        if profile_data.phone
+        else None
+    )
+
+    current_user.gender = (
+        profile_data.gender
+    )
+
+    await db.commit()
+    await db.refresh(current_user)
+
+    return {
+        "full_name": current_user.full_name,
+        "email": current_user.email,
+        "phone": current_user.phone,
+        "gender": current_user.gender,
+        "role": current_user.role,
+        "is_active": current_user.is_active,
+        "is_verified": current_user.is_verified,
+    }
+
+
+# =========================================================
+# REQUEST EMAIL CHANGE
+#
+# OTP IS SENT TO THE NEW EMAIL.
+# =========================================================
+
+@router.post(
+    "/change-email",
+)
+async def change_email(
+    request: ChangeEmailRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+
+    new_email = str(
+        request.new_email
+    ).strip().lower()
+
+    # =====================================================
+    # SAME EMAIL
+    # =====================================================
+
+    if new_email == current_user.email.lower():
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New email is the same as your current email",
+        )
+
+    # =====================================================
+    # CHECK EMAIL ALREADY EXISTS
+    # =====================================================
+
+    result = await db.execute(
+        select(User).where(
+            User.email == new_email
+        )
+    )
+
+    existing_user = result.scalar_one_or_none()
+
+    if existing_user is not None:
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is already registered",
+        )
+
+    # =====================================================
+    # GENERATE EMAIL CHANGE OTP
+    # =====================================================
+
+    code = create_verification_code()
+
+    code_expires = (
+        datetime.now(timezone.utc)
+        + timedelta(minutes=10)
+    )
+
+    current_user.pending_email = new_email
+
+    current_user.email_change_code = code
+
+    current_user.email_change_code_expires = (
+        code_expires
+    )
+
+    await db.commit()
+
+    # =====================================================
+    # SEND OTP TO NEW EMAIL
+    # =====================================================
+
+    email_body = f"""
+Hello {current_user.full_name},
+
+You requested to change your ShopSphere account email.
+
+Your email change verification code is:
+
+{code}
+
+This verification code will expire in 10 minutes.
+
+If you did not request this email change,
+you can safely ignore this email.
+
+Regards,
+ShopSphere Team
+"""
+
+    background_tasks.add_task(
+        send_email,
+        new_email,
+        "ShopSphere - Email Change Verification Code",
+        email_body,
+    )
+
+    return {
+        "message": (
+            "Verification code sent to your new email address"
+        ),
+        "pending_email": new_email,
+    }
+
+
+# =========================================================
+# VERIFY EMAIL CHANGE
+# =========================================================
+
+@router.post(
+    "/verify-email-change",
+)
+async def verify_email_change(
+    request: VerifyEmailChangeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+
+    # =====================================================
+    # CHECK PENDING EMAIL
+    # =====================================================
+
+    if current_user.pending_email is None:
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No email change request found",
+        )
+
+    # =====================================================
+    # CHECK OTP EXISTS
+    # =====================================================
+
+    if current_user.email_change_code is None:
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No email change verification code found",
+        )
+
+    # =====================================================
+    # CHECK OTP
+    # =====================================================
+
+    if (
+        current_user.email_change_code
+        != request.code.strip()
+    ):
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification code",
+        )
+
+    # =====================================================
+    # CHECK EXPIRY
+    # =====================================================
+
+    expires_at = (
+        current_user.email_change_code_expires
+    )
+
+    if expires_at is None:
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code has expired",
+        )
+
+    if expires_at.tzinfo is None:
+
+        expires_at = expires_at.replace(
+            tzinfo=timezone.utc
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if expires_at < now:
+
+        current_user.pending_email = None
+
+        current_user.email_change_code = None
+
+        current_user.email_change_code_expires = None
+
+        await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code has expired",
+        )
+
+    # =====================================================
+    # CHECK THAT PENDING EMAIL IS STILL AVAILABLE
+    # =====================================================
+
+    result = await db.execute(
+        select(User).where(
+            User.email == current_user.pending_email,
+            User.id != current_user.id,
+        )
+    )
+
+    existing_user = result.scalar_one_or_none()
+
+    if existing_user is not None:
+
+        current_user.pending_email = None
+
+        current_user.email_change_code = None
+
+        current_user.email_change_code_expires = None
+
+        await db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is already registered",
+        )
+
+    # =====================================================
+    # CHANGE EMAIL
+    # =====================================================
+
+    current_user.email = current_user.pending_email
+
+    current_user.pending_email = None
+
+    current_user.email_change_code = None
+
+    current_user.email_change_code_expires = None
+
+    await db.commit()
+    await db.refresh(current_user)
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
+    return {
+        "message": "Email changed successfully",
+        "email": current_user.email,
+    }
+
+
+# =========================================================
+# ADMIN CHECK
+# =========================================================
+
+async def require_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+
+    if current_user.role != "admin":
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+
+    return current_user
+
+
+# =========================================================
+# ADMIN - GET ALL USERS
+# =========================================================
+
+@router.get(
+    "/admin/users",
+    response_model=list[AdminUserResponse],
+)
+async def admin_get_users(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+
+    result = await db.execute(
+        select(User).order_by(
+            User.id.asc()
+        )
+    )
+
+    users = result.scalars().all()
+
+    return [
+        {
+            "id": user.id,
+            "full_name": user.full_name,
+            "email": user.email,
+            "phone": user.phone,
+            "gender": user.gender,
+            "role": user.role,
+            "is_active": user.is_active,
+            "is_verified": user.is_verified,
+        }
+        for user in users
+    ]
+
+
+# =========================================================
+# ADMIN - GET SINGLE USER
+# =========================================================
+
+@router.get(
+    "/admin/users/{user_id}",
+    response_model=AdminUserResponse,
+)
+async def admin_get_user(
+    user_id: int,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+
+    result = await db.execute(
+        select(User).where(
+            User.id == user_id
+        )
+    )
+
+    user = result.scalar_one_or_none()
+
+    if user is None:
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    return {
+        "id": user.id,
+        "full_name": user.full_name,
+        "email": user.email,
+        "phone": user.phone,
+        "gender": user.gender,
+        "role": user.role,
+        "is_active": user.is_active,
+        "is_verified": user.is_verified,
+    }
+
+
+# =========================================================
+# ADMIN - UPDATE USER
+#
+# EMAIL AND PASSWORD ARE NOT UPDATED HERE.
+# =========================================================
+
+@router.patch(
+    "/admin/users/{user_id}",
+    response_model=AdminUserResponse,
+)
+async def admin_update_user(
+    user_id: int,
+    user_data: AdminUserUpdateRequest,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+
+    # =====================================================
+    # FIND USER
+    # =====================================================
+
+    result = await db.execute(
+        select(User).where(
+            User.id == user_id
+        )
+    )
+
+    user = result.scalar_one_or_none()
+
+    if user is None:
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # =====================================================
+    # PREVENT ADMIN FROM REMOVING OWN ADMIN ROLE
+    # =====================================================
+
+    if (
+        user.id == current_user.id
+        and user_data.role is not None
+        and user_data.role != "admin"
+    ):
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot remove your own admin role",
+        )
+
+    # =====================================================
+    # PREVENT ADMIN FROM DEACTIVATING OWN ACCOUNT
+    # =====================================================
+
+    if (
+        user.id == current_user.id
+        and user_data.is_active is False
+    ):
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate your own account",
+        )
+
+    # =====================================================
+    # UPDATE FULL NAME
+    # =====================================================
+
+    if user_data.full_name is not None:
+
+        user.full_name = (
+            user_data.full_name.strip()
+        )
+
+    # =====================================================
+    # UPDATE PHONE
+    # =====================================================
+
+    if user_data.phone is not None:
+
+        user.phone = (
+            user_data.phone.strip()
+            if user_data.phone
+            else None
+        )
+
+    # =====================================================
+    # UPDATE GENDER
+    # =====================================================
+
+    if user_data.gender is not None:
+
+        user.gender = user_data.gender
+
+    # =====================================================
+    # UPDATE ROLE
+    # =====================================================
+
+    if user_data.role is not None:
+
+        user.role = user_data.role
+
+    # =====================================================
+    # UPDATE ACTIVE STATUS
+    # =====================================================
+
+    if user_data.is_active is not None:
+
+        user.is_active = user_data.is_active
+
+        # -------------------------------------------------
+        # Invalidate refresh token when deactivated
+        # -------------------------------------------------
+
+        if user.is_active is False:
+
+            user.refresh_token = None
+
+    await db.commit()
+    await db.refresh(user)
+
+    return {
+        "id": user.id,
+        "full_name": user.full_name,
+        "email": user.email,
+        "phone": user.phone,
+        "gender": user.gender,
+        "role": user.role,
+        "is_active": user.is_active,
+        "is_verified": user.is_verified,
+    }
+
+
+# =========================================================
+# ADMIN - DELETE USER
+# =========================================================
+
+@router.delete(
+    "/admin/users/{user_id}",
+)
+async def admin_delete_user(
+    user_id: int,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+
+    # =====================================================
+    # PREVENT SELF DELETE
+    # =====================================================
+
+    if user_id == current_user.id:
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot delete your own admin account",
+        )
+
+    # =====================================================
+    # FIND USER
+    # =====================================================
+
+    result = await db.execute(
+        select(User).where(
+            User.id == user_id
+        )
+    )
+
+    user = result.scalar_one_or_none()
+
+    if user is None:
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # =====================================================
+    # PREVENT DELETING THE LAST ADMIN
+    # =====================================================
+
+    if user.role == "admin":
+
+        admin_count_result = await db.execute(
+            select(func.count(User.id)).where(
+                User.role == "admin",
+                User.is_active.is_(True),
+            )
+        )
+
+        admin_count = (
+            admin_count_result.scalar_one()
+        )
+
+        if admin_count <= 1:
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete the last active admin",
+            )
+
+    # =====================================================
+    # DELETE USER
+    # =====================================================
+
+    await db.delete(user)
+
+    try:
+
+        await db.commit()
+
+    except Exception:
+
+        await db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "User cannot be deleted because "
+                "other records depend on this user"
+            ),
+        )
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
+    return {
+        "message": "User deleted successfully",
+        "user_id": user_id,
     }
