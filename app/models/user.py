@@ -9,6 +9,7 @@ from app.models.base import Base
 
 if TYPE_CHECKING:
     from app.models.product import Product
+    from app.models.cart import Cart
 
 
 class User(Base):
@@ -84,11 +85,29 @@ class User(Base):
         nullable=True,
     )
 
+    # =========================================================
+    # SELLER PRODUCTS
+    # =========================================================
+
     products: Mapped[list["Product"]] = relationship(
+        "Product",
         back_populates="seller",
     )
 
-#================================================================
+    # =========================================================
+    # CUSTOMER CART
+    # =========================================================
+
+    cart: Mapped["Cart | None"] = relationship(
+        "Cart",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    # =========================================================
+    # PROFILE / EMAIL CHANGE
+    # =========================================================
 
     gender: Mapped[str | None] = mapped_column(
         String(30),

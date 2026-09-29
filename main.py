@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.category import router as category_router
 from app.api.product import router as product_router
 from app.api.auth import router as auth_router
-
+from app.api.cart import router as cart_router
 
 app = FastAPI(
     title="ShopSphere API",
@@ -49,7 +49,7 @@ app.add_middleware(
 app.include_router(category_router)
 app.include_router(product_router)
 app.include_router(auth_router)
-
+app.include_router(cart_router)
 
 # ============================================================
 # ROOT
