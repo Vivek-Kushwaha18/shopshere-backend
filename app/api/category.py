@@ -11,12 +11,47 @@ from app.schemas.category import (
     CategoryResponse,
     CategoryUpdate,
 )
+from app.utils.slug import slugify
 
 
 router = APIRouter(
     prefix="/categories",
     tags=["Categories"],
 )
+
+
+# =========================================================
+# GENERATE UNIQUE CATEGORY SLUG
+# =========================================================
+
+async def generate_category_slug(
+    db: AsyncSession,
+    name: str,
+) -> str:
+    base_slug = slugify(name)
+
+    if not base_slug:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Category name cannot generate a valid slug",
+        )
+
+    slug = base_slug
+    counter = 2
+
+    while True:
+        result = await db.execute(
+            select(Category).where(
+                Category.slug == slug
+            )
+        )
+
+        existing_category = result.scalar_one_or_none()
+
+        if existing_category is None:
+            return slug
+
+        slug = f"{base_slug}-{counter}"
 
 
 # =========================================================
@@ -45,7 +80,42 @@ async def get_categories(
 
 
 # =========================================================
-# GET ONE ACTIVE CATEGORY
+# GET ONE ACTIVE CATEGORY BY SLUG
+#
+# Public
+# Customer
+# Seller
+# Admin
+# =========================================================
+
+@router.get(
+    "/slug/{slug}",
+    response_model=CategoryResponse,
+)
+async def get_category_by_slug(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Category).where(
+            Category.slug == slug,
+            Category.is_active.is_(True),
+        )
+    )
+
+    category = result.scalar_one_or_none()
+
+    if category is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Category not found",
+        )
+
+    return category
+
+
+# =========================================================
+# GET ONE ACTIVE CATEGORY BY ID
 #
 # Public
 # Customer
@@ -118,7 +188,7 @@ async def create_category(
         )
 
     # -----------------------------------------------------
-    # CHECK DUPLICATE
+    # CHECK DUPLICATE NAME
     # -----------------------------------------------------
 
     result = await db.execute(
@@ -136,11 +206,21 @@ async def create_category(
         )
 
     # -----------------------------------------------------
+    # GENERATE SLUG
+    # -----------------------------------------------------
+
+    slug = await generate_category_slug(
+        db,
+        name,
+    )
+
+    # -----------------------------------------------------
     # CREATE
     # -----------------------------------------------------
 
     category = Category(
         name=name,
+        slug=slug,
         description=(
             category_data.description.strip()
             if category_data.description
@@ -161,6 +241,9 @@ async def create_category(
 # UPDATE CATEGORY
 #
 # ADMIN ONLY
+#
+# IMPORTANT:
+# Slug is NOT changed when category name changes.
 # =========================================================
 
 @router.put(

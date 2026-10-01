@@ -20,6 +20,13 @@ class Category(Base):
         nullable=False,
         index=True,
     )
+    
+    slug: Mapped[str | None] = mapped_column(
+    String(120),
+    unique=True,
+    nullable=True,
+    index=True,
+    )
 
     description: Mapped[str | None] = mapped_column(
         Text,

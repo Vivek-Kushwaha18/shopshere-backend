@@ -26,6 +26,7 @@ class CategoryUpdate(BaseModel):
 class CategoryResponse(BaseModel):
     id: int
     name: str
+    slug: str
     description: str | None
     is_active: bool
     created_at: datetime

@@ -42,6 +42,13 @@ class Product(Base):
         String(255),
         nullable=False,
     )
+    
+    slug = Column(
+    String(255),
+    nullable=True,
+    unique=True,
+    index=True,
+    )
 
     description = Column(
         Text,

@@ -48,6 +48,7 @@ class ProductResponse(BaseModel):
     category_id: int
 
     name: str
+    slug: str
     description: Optional[str] = None
 
     price: float
