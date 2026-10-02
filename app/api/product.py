@@ -183,6 +183,10 @@ async def generate_product_slug(
 
         slug = f"{base_slug}-{counter}"
 
+        # IMPORTANT:
+        # Move to the next slug number.
+        counter += 1
+
 
 # =========================================================
 # PRODUCT PERMISSION HELPER
@@ -1348,6 +1352,7 @@ async def update_stock(
     db: AsyncSession = Depends(
         get_db
     ),
+
 ):
 
     result = await db.execute(
@@ -1411,6 +1416,7 @@ async def delete_product(
     db: AsyncSession = Depends(
         get_db
     ),
+
 ):
 
     result = await db.execute(

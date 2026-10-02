@@ -33,7 +33,10 @@ async def generate_category_slug(
     if not base_slug:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Category name cannot generate a valid slug",
+            detail=(
+                "Category name cannot generate "
+                "a valid slug"
+            ),
         )
 
     slug = base_slug
@@ -46,12 +49,18 @@ async def generate_category_slug(
             )
         )
 
-        existing_category = result.scalar_one_or_none()
+        existing_category = (
+            result.scalar_one_or_none()
+        )
 
         if existing_category is None:
             return slug
 
         slug = f"{base_slug}-{counter}"
+
+        # IMPORTANT:
+        # Move to the next slug number.
+        counter += 1
 
 
 # =========================================================
@@ -72,7 +81,9 @@ async def get_categories(
 ):
     result = await db.execute(
         select(Category)
-        .where(Category.is_active.is_(True))
+        .where(
+            Category.is_active.is_(True)
+        )
         .order_by(Category.name)
     )
 
@@ -103,7 +114,9 @@ async def get_category_by_slug(
         )
     )
 
-    category = result.scalar_one_or_none()
+    category = (
+        result.scalar_one_or_none()
+    )
 
     if category is None:
         raise HTTPException(
@@ -138,7 +151,9 @@ async def get_category(
         )
     )
 
-    category = result.scalar_one_or_none()
+    category = (
+        result.scalar_one_or_none()
+    )
 
     if category is None:
         raise HTTPException(
@@ -163,7 +178,9 @@ async def get_category(
 async def create_category(
     category_data: CategoryCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
     # -----------------------------------------------------
     # ADMIN CHECK
@@ -172,7 +189,10 @@ async def create_category(
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admin can create categories",
+            detail=(
+                "Only admin can create "
+                "categories"
+            ),
         )
 
     # -----------------------------------------------------
@@ -184,7 +204,9 @@ async def create_category(
     if not name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Category name cannot be empty",
+            detail=(
+                "Category name cannot be empty"
+            ),
         )
 
     # -----------------------------------------------------
@@ -197,7 +219,9 @@ async def create_category(
         )
     )
 
-    existing_category = result.scalar_one_or_none()
+    existing_category = (
+        result.scalar_one_or_none()
+    )
 
     if existing_category is not None:
         raise HTTPException(
@@ -254,7 +278,9 @@ async def update_category(
     category_id: int,
     category_data: CategoryUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
     # -----------------------------------------------------
     # ADMIN CHECK
@@ -263,7 +289,10 @@ async def update_category(
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admin can update categories",
+            detail=(
+                "Only admin can update "
+                "categories"
+            ),
         )
 
     # -----------------------------------------------------
@@ -276,7 +305,9 @@ async def update_category(
         )
     )
 
-    category = result.scalar_one_or_none()
+    category = (
+        result.scalar_one_or_none()
+    )
 
     if category is None:
         raise HTTPException(
@@ -294,8 +325,13 @@ async def update_category(
 
         if not name:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Category name cannot be empty",
+                status_code=(
+                    status.HTTP_400_BAD_REQUEST
+                ),
+                detail=(
+                    "Category name "
+                    "cannot be empty"
+                ),
             )
 
         duplicate_result = await db.execute(
@@ -311,7 +347,9 @@ async def update_category(
 
         if duplicate_category is not None:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=(
+                    status.HTTP_400_BAD_REQUEST
+                ),
                 detail="Category already exists",
             )
 
@@ -322,6 +360,7 @@ async def update_category(
     # -----------------------------------------------------
 
     if category_data.description is not None:
+
         category.description = (
             category_data.description.strip()
             or None
@@ -350,12 +389,17 @@ async def update_category(
 async def activate_category(
     category_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admin can activate categories",
+            detail=(
+                "Only admin can activate "
+                "categories"
+            ),
         )
 
     result = await db.execute(
@@ -364,7 +408,9 @@ async def activate_category(
         )
     )
 
-    category = result.scalar_one_or_none()
+    category = (
+        result.scalar_one_or_none()
+    )
 
     if category is None:
         raise HTTPException(
@@ -393,12 +439,17 @@ async def activate_category(
 async def deactivate_category(
     category_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admin can deactivate categories",
+            detail=(
+                "Only admin can deactivate "
+                "categories"
+            ),
         )
 
     result = await db.execute(
@@ -407,7 +458,9 @@ async def deactivate_category(
         )
     )
 
-    category = result.scalar_one_or_none()
+    category = (
+        result.scalar_one_or_none()
+    )
 
     if category is None:
         raise HTTPException(
@@ -435,12 +488,17 @@ async def deactivate_category(
 async def delete_category(
     category_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admin can delete categories",
+            detail=(
+                "Only admin can delete "
+                "categories"
+            ),
         )
 
     result = await db.execute(
@@ -449,7 +507,9 @@ async def delete_category(
         )
     )
 
-    category = result.scalar_one_or_none()
+    category = (
+        result.scalar_one_or_none()
+    )
 
     if category is None:
         raise HTTPException(
@@ -463,5 +523,7 @@ async def delete_category(
 
     return {
         "success": True,
-        "message": "Category deleted successfully",
+        "message": (
+            "Category deleted successfully"
+        ),
     }
