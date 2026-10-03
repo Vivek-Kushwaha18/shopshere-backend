@@ -10,7 +10,7 @@ from app.models.base import Base
 if TYPE_CHECKING:
     from app.models.product import Product
     from app.models.cart import Cart
-
+    from app.models.order import Order
 
 class User(Base):
     __tablename__ = "users"
@@ -127,4 +127,14 @@ class User(Base):
     email_change_code_expires: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+
+    # =========================================================
+    # CUSTOMER ORDERS
+    # =========================================================
+
+    orders: Mapped[list["Order"]] = relationship(
+        "Order",
+        back_populates="user",
+        cascade="all, delete-orphan",
     )
