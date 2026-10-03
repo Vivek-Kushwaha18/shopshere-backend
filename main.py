@@ -7,6 +7,7 @@ from app.api.product import router as product_router
 from app.api.auth import router as auth_router
 from app.api.cart import router as cart_router
 from app.api.order import router as order_router
+from app.api.address import router as address_router
 app = FastAPI(
     title="ShopSphere API",
     description="AI-Powered Multi-Vendor E-Commerce Platform API",
@@ -51,6 +52,7 @@ app.include_router(product_router)
 app.include_router(auth_router)
 app.include_router(cart_router)
 app.include_router(order_router)
+app.include_router(address_router)
 # ============================================================
 # ROOT
 # ============================================================

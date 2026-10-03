@@ -9,7 +9,13 @@ from alembic import context
 from dotenv import load_dotenv
 
 # Add backend directory to Python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(
+    os.path.dirname(
+        os.path.dirname(
+            os.path.abspath(__file__)
+        )
+    )
+)
 
 # Load environment variables from .env
 load_dotenv()
@@ -32,6 +38,7 @@ from app.models.cart import Cart
 from app.models.cart_item import CartItem
 from app.models.order import Order
 from app.models.order import OrderItem
+from app.models.address import Address
 
 # Add your models' metadata here
 target_metadata = Base.metadata
@@ -48,7 +55,9 @@ def get_database_url():
     # Alembic uses psycopg2/psycopg
     # If your DATABASE_URL starts with postgresql+asyncpg,
     # convert it to normal postgresql.
-    if database_url.startswith("postgresql+asyncpg://"):
+    if database_url.startswith(
+        "postgresql+asyncpg://"
+    ):
         database_url = database_url.replace(
             "postgresql+asyncpg://",
             "postgresql://",
@@ -67,7 +76,9 @@ def run_migrations_offline() -> None:
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
+        dialect_opts={
+            "paramstyle": "named"
+        },
     )
 
     with context.begin_transaction():
@@ -82,7 +93,9 @@ def run_migrations_online() -> None:
         {},
     )
 
-    configuration["sqlalchemy.url"] = get_database_url()
+    configuration["sqlalchemy.url"] = (
+        get_database_url()
+    )
 
     connectable = engine_from_config(
         configuration,

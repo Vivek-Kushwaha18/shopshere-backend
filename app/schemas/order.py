@@ -63,7 +63,9 @@ class OrderResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    items: list[OrderItemResponse] = []
+    items: list[OrderItemResponse] = Field(
+        default_factory=list,
+    )
 
     model_config = {
         "from_attributes": True,
