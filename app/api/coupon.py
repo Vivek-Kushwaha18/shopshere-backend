@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -39,6 +39,15 @@ class CouponUpdate(BaseModel):
     expiry_date: datetime
     usage_limit: int | None = None
     is_active: bool = True
+
+
+def make_naive_utc(value: datetime) -> datetime:
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
+
+    return value
 
 
 def validate_coupon_data(data):
@@ -144,14 +153,22 @@ async def create_coupon(
             detail="Coupon code already exists.",
         )
 
+    start_date = make_naive_utc(
+        coupon_data.start_date
+    )
+
+    expiry_date = make_naive_utc(
+        coupon_data.expiry_date
+    )
+
     coupon = Coupon(
         code=code,
         discount_type=coupon_data.discount_type,
         discount_value=coupon_data.discount_value,
         minimum_order_amount=coupon_data.minimum_order_amount,
         maximum_discount=coupon_data.maximum_discount,
-        start_date=coupon_data.start_date,
-        expiry_date=coupon_data.expiry_date,
+        start_date=start_date,
+        expiry_date=expiry_date,
         usage_limit=coupon_data.usage_limit,
         is_active=coupon_data.is_active,
     )
@@ -243,6 +260,14 @@ async def update_coupon(
             detail="Coupon code already exists.",
         )
 
+    start_date = make_naive_utc(
+        coupon_data.start_date
+    )
+
+    expiry_date = make_naive_utc(
+        coupon_data.expiry_date
+    )
+
     coupon.code = code
     coupon.discount_type = coupon_data.discount_type
     coupon.discount_value = coupon_data.discount_value
@@ -252,8 +277,8 @@ async def update_coupon(
     coupon.maximum_discount = (
         coupon_data.maximum_discount
     )
-    coupon.start_date = coupon_data.start_date
-    coupon.expiry_date = coupon_data.expiry_date
+    coupon.start_date = start_date
+    coupon.expiry_date = expiry_date
     coupon.usage_limit = coupon_data.usage_limit
     coupon.is_active = coupon_data.is_active
 
