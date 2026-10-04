@@ -16,6 +16,7 @@ from app.core.stripe import (
     STRIPE_WEBHOOK_SECRET,
 )
 from app.database.database import get_db
+from app.models.coupon import Coupon
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment
 from app.models.product import Product
@@ -272,12 +273,22 @@ async def stripe_webhook(
         payment = result.scalar_one_or_none()
 
         if payment:
+            # -------------------------------------------------
+            # IMPORTANT:
             # Make webhook idempotent.
-            # If this event is received again after payment
-            # is already marked paid, do nothing.
+            #
+            # If Stripe sends the same successful webhook
+            # again after payment is already marked paid,
+            # coupon usage will NOT increase again.
+            # -------------------------------------------------
+
             if payment.status != "paid":
                 payment.status = "paid"
                 payment.transaction_id = payment_intent_id
+
+                # -------------------------------------------------
+                # GET ORDER
+                # -------------------------------------------------
 
                 order_result = await db.execute(
                     select(Order).where(
@@ -290,6 +301,25 @@ async def stripe_webhook(
                 if order:
                     order.payment_status = "paid"
                     order.status = "processing"
+
+                    # -------------------------------------------------
+                    # INCREASE COUPON USAGE
+                    # -------------------------------------------------
+
+                    if order.coupon_code:
+                        coupon_result = await db.execute(
+                            select(Coupon).where(
+                                Coupon.code
+                                == order.coupon_code
+                            )
+                        )
+
+                        coupon = (
+                            coupon_result.scalar_one_or_none()
+                        )
+
+                        if coupon:
+                            coupon.used_count += 1
 
                 await db.commit()
 

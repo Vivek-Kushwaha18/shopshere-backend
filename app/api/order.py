@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,14 +8,12 @@ from app.core.dependencies import (
     get_current_seller,
     get_current_user,
 )
-
 from app.database.database import get_db
-
+from app.models.coupon import Coupon
 from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.product_image import ProductImage
 from app.models.user import User
-
 from app.schemas.order import (
     OrderCreate,
     OrderResponse,
@@ -52,6 +52,10 @@ async def create_order(
             detail="Order must contain at least one item.",
         )
 
+    # -----------------------------------------------------
+    # GET PRODUCTS
+    # -----------------------------------------------------
+
     product_ids = [
         item.product_id
         for item in order_data.items
@@ -78,21 +82,11 @@ async def create_order(
             detail="One or more products were not found.",
         )
 
-    total_amount = 0.0
+    # -----------------------------------------------------
+    # CALCULATE SUBTOTAL
+    # -----------------------------------------------------
 
-    order = Order(
-        user_id=current_user.id,
-        total_amount=0.0,
-        status="pending",
-        payment_status="pending",
-        shipping_address=order_data.shipping_address,
-    )
-
-    db.add(order)
-
-    await db.flush()
-
-    order_items = []
+    subtotal = 0.0
 
     for item_data in order_data.items:
         product = products_by_id[item_data.product_id]
@@ -107,7 +101,183 @@ async def create_order(
                 ),
             )
 
-        item_total = product.price * item_data.quantity
+        item_total = (
+            float(product.price)
+            * item_data.quantity
+        )
+
+        subtotal += item_total
+
+    # -----------------------------------------------------
+    # COUPON
+    # -----------------------------------------------------
+
+    discount_amount = 0.0
+    coupon_code = None
+
+    if order_data.coupon_code:
+        coupon_code = (
+            order_data.coupon_code.strip().upper()
+        )
+
+        if not coupon_code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Coupon code cannot be empty.",
+            )
+
+        coupon_result = await db.execute(
+            select(Coupon).where(
+                Coupon.code == coupon_code
+            )
+        )
+
+        coupon = coupon_result.scalar_one_or_none()
+
+        if not coupon:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid coupon code.",
+            )
+
+        # -------------------------------------------------
+        # CHECK ACTIVE
+        # -------------------------------------------------
+
+        if not coupon.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This coupon is inactive.",
+            )
+
+        # -------------------------------------------------
+        # CHECK DATES
+        # -------------------------------------------------
+
+        now = datetime.utcnow()
+
+        if now < coupon.start_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This coupon is not active yet.",
+            )
+
+        if now > coupon.expiry_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This coupon has expired.",
+            )
+
+        # -------------------------------------------------
+        # CHECK USAGE LIMIT
+        # -------------------------------------------------
+
+        if (
+            coupon.usage_limit is not None
+            and coupon.used_count >= coupon.usage_limit
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This coupon usage limit has been reached.",
+            )
+
+        # -------------------------------------------------
+        # CHECK MINIMUM ORDER AMOUNT
+        # -------------------------------------------------
+
+        if (
+            subtotal
+            < float(coupon.minimum_order_amount)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Minimum order amount for this coupon "
+                    f"is ₹{float(coupon.minimum_order_amount):.2f}."
+                ),
+            )
+
+        # -------------------------------------------------
+        # CALCULATE DISCOUNT
+        # -------------------------------------------------
+
+        if coupon.discount_type == "percentage":
+            discount_amount = (
+                subtotal
+                * float(coupon.discount_value)
+                / 100
+            )
+
+        elif coupon.discount_type == "fixed":
+            discount_amount = float(
+                coupon.discount_value
+            )
+
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid coupon discount type.",
+            )
+
+        # -------------------------------------------------
+        # MAXIMUM DISCOUNT
+        # -------------------------------------------------
+
+        if coupon.maximum_discount is not None:
+            discount_amount = min(
+                discount_amount,
+                float(coupon.maximum_discount),
+            )
+
+        # -------------------------------------------------
+        # DISCOUNT CANNOT EXCEED SUBTOTAL
+        # -----------------------------------------------------
+
+        discount_amount = min(
+            discount_amount,
+            subtotal,
+        )
+
+    # -----------------------------------------------------
+    # FINAL TOTAL
+    # -----------------------------------------------------
+
+    total_amount = max(
+        subtotal - discount_amount,
+        0,
+    )
+
+    # -----------------------------------------------------
+    # CREATE ORDER
+    # -----------------------------------------------------
+
+    order = Order(
+        user_id=current_user.id,
+        total_amount=round(total_amount, 2),
+        discount_amount=round(discount_amount, 2),
+        coupon_code=coupon_code,
+        status="pending",
+        payment_status="pending",
+        shipping_address=order_data.shipping_address,
+    )
+
+    db.add(order)
+
+    await db.flush()
+
+    # -----------------------------------------------------
+    # CREATE ORDER ITEMS
+    # -----------------------------------------------------
+
+    order_items = []
+
+    for item_data in order_data.items:
+        product = products_by_id[item_data.product_id]
+
+        item_total = (
+            float(product.price)
+            * item_data.quantity
+        )
 
         order_item = OrderItem(
             order_id=order.id,
@@ -122,15 +292,16 @@ async def create_order(
 
         order_items.append(order_item)
 
+        # Reduce stock
         product.stock -= item_data.quantity
-
-        total_amount += item_total
-
-    order.total_amount = total_amount
 
     await db.commit()
 
     await db.refresh(order)
+
+    # -----------------------------------------------------
+    # GET PRIMARY PRODUCT IMAGES
+    # -----------------------------------------------------
 
     image_result = await db.execute(
         select(ProductImage).where(
@@ -146,10 +317,16 @@ async def create_order(
         for image in primary_images
     }
 
+    # -----------------------------------------------------
+    # RETURN ORDER
+    # -----------------------------------------------------
+
     return OrderResponse(
         id=order.id,
         user_id=order.user_id,
         total_amount=order.total_amount,
+        discount_amount=order.discount_amount,
+        coupon_code=order.coupon_code,
         status=order.status,
         payment_status=order.payment_status,
         shipping_address=order.shipping_address,
@@ -252,6 +429,8 @@ async def get_my_orders(
                 id=order.id,
                 user_id=order.user_id,
                 total_amount=order.total_amount,
+                discount_amount=order.discount_amount,
+                coupon_code=order.coupon_code,
                 status=order.status,
                 payment_status=order.payment_status,
                 shipping_address=order.shipping_address,
@@ -543,6 +722,8 @@ async def get_seller_orders(
                 id=order.id,
                 user_id=order.user_id,
                 total_amount=order.total_amount,
+                discount_amount=order.discount_amount,
+                coupon_code=order.coupon_code,
                 status=order.status,
                 payment_status=order.payment_status,
                 shipping_address=order.shipping_address,
@@ -683,6 +864,8 @@ async def update_seller_order_status(
         id=order.id,
         user_id=order.user_id,
         total_amount=order.total_amount,
+        discount_amount=order.discount_amount,
+        coupon_code=order.coupon_code,
         status=order.status,
         payment_status=order.payment_status,
         shipping_address=order.shipping_address,
@@ -816,6 +999,8 @@ async def get_order(
         id=order.id,
         user_id=order.user_id,
         total_amount=order.total_amount,
+        discount_amount=order.discount_amount,
+        coupon_code=order.coupon_code,
         status=order.status,
         payment_status=order.payment_status,
         shipping_address=order.shipping_address,

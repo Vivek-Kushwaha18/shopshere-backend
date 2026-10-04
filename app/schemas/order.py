@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 class OrderItemCreate(BaseModel):
     product_id: int
+
     quantity: int = Field(
         ...,
         gt=0,
@@ -24,6 +25,11 @@ class OrderCreate(BaseModel):
     items: list[OrderItemCreate] = Field(
         ...,
         min_length=1,
+    )
+
+    coupon_code: str | None = Field(
+        default=None,
+        max_length=50,
     )
 
 
@@ -56,10 +62,15 @@ class OrderItemResponse(BaseModel):
 class OrderResponse(BaseModel):
     id: int
     user_id: int
+
     total_amount: float
+    discount_amount: float
+    coupon_code: str | None = None
+
     status: str
     payment_status: str
     shipping_address: str
+
     created_at: datetime
     updated_at: datetime
 

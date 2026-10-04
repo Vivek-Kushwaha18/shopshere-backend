@@ -10,6 +10,10 @@ from app.api.order import router as order_router
 from app.api.address import router as address_router
 from app.api.payment import router as payment_router
 from app.api.wishlist import router as wishlist_router
+from app.api.reports import router as reports_router
+from app.api.coupon import router as coupon_router
+from app.api.customer_coupon import router as customer_coupon_router
+
 
 app = FastAPI(
     title="ShopSphere API",
@@ -58,6 +62,9 @@ app.include_router(order_router)
 app.include_router(address_router)
 app.include_router(payment_router)
 app.include_router(wishlist_router)
+app.include_router(reports_router)
+app.include_router(coupon_router)
+app.include_router(customer_coupon_router)
 # ============================================================
 # ROOT
 # ============================================================

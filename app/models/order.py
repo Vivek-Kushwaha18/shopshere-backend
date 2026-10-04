@@ -33,6 +33,17 @@ class Order(Base):
         nullable=False,
     )
 
+    discount_amount: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0,
+    )
+
+    coupon_code: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
     status: Mapped[str] = mapped_column(
         String(30),
         nullable=False,
