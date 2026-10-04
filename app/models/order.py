@@ -74,6 +74,12 @@ class Order(Base):
         cascade="all, delete-orphan",
     )
 
+    payments = relationship(
+        "Payment",
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
+
 
 class OrderItem(Base):
     __tablename__ = "order_items"

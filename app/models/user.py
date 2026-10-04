@@ -11,6 +11,8 @@ if TYPE_CHECKING:
     from app.models.product import Product
     from app.models.cart import Cart
     from app.models.order import Order
+    from app.models.payment import Payment
+
 
 class User(Base):
     __tablename__ = "users"
@@ -135,6 +137,16 @@ class User(Base):
 
     orders: Mapped[list["Order"]] = relationship(
         "Order",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+    # =========================================================
+    # CUSTOMER PAYMENTS
+    # =========================================================
+
+    payments: Mapped[list["Payment"]] = relationship(
+        "Payment",
         back_populates="user",
         cascade="all, delete-orphan",
     )
