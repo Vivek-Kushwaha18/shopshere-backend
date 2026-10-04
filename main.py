@@ -9,7 +9,7 @@ from app.api.cart import router as cart_router
 from app.api.order import router as order_router
 from app.api.address import router as address_router
 from app.api.payment import router as payment_router
-
+from app.api.wishlist import router as wishlist_router
 
 app = FastAPI(
     title="ShopSphere API",
@@ -57,6 +57,7 @@ app.include_router(cart_router)
 app.include_router(order_router)
 app.include_router(address_router)
 app.include_router(payment_router)
+app.include_router(wishlist_router)
 # ============================================================
 # ROOT
 # ============================================================

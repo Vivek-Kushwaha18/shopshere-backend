@@ -42,12 +42,12 @@ class Product(Base):
         String(255),
         nullable=False,
     )
-    
+
     slug = Column(
-    String(255),
-    nullable=True,
-    unique=True,
-    index=True,
+        String(255),
+        nullable=True,
+        unique=True,
+        index=True,
     )
 
     description = Column(
@@ -123,4 +123,10 @@ class Product(Base):
         back_populates="product",
         cascade="all, delete-orphan",
         lazy="selectin",
+    )
+
+    wishlists = relationship(
+        "Wishlist",
+        back_populates="product",
+        cascade="all, delete-orphan",
     )

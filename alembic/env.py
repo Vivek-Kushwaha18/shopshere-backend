@@ -40,6 +40,7 @@ from app.models.order import Order
 from app.models.order import OrderItem
 from app.models.address import Address
 from app.models.payment import Payment
+from app.models.wishlist import Wishlist 
 # Add your models' metadata here
 target_metadata = Base.metadata
 
