@@ -230,6 +230,13 @@ async def stripe_webhook(
 
     payload = await request.body()
 
+    # -----------------------------------------------------
+    # PRINT RAW WEBHOOK BODY
+    # -----------------------------------------------------
+
+    print("*** Request Payload ***")
+    print(payload.decode("utf-8"))
+
     signature = request.headers.get(
         "stripe-signature"
     )
