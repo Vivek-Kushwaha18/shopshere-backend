@@ -1,6 +1,7 @@
+import json
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,9 +38,15 @@ router = APIRouter(
 )
 async def create_order(
     order_data: OrderCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    payload = await request.json()
+
+    print(f"*** Request Payload ***")
+    print(json.dumps(payload, indent=2))
+    print(f"******")
     if current_user.role != "customer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -51,6 +58,9 @@ async def create_order(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Order must contain at least one item.",
         )
+
+
+
 
     # -----------------------------------------------------
     # GET PRODUCTS
