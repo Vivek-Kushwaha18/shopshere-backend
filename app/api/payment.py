@@ -162,7 +162,14 @@ async def create_payment_intent(
         payment_intent = stripe.PaymentIntent.create(
             amount=amount_in_paise,
             currency=currency.lower(),
-            payment_method_types=["card"],
+            description=f"ShopSphere order #{order.id}",
+            shipping={
+                "name": current_user.full_name,
+                "address": {
+                    "line1": order.shipping_address,
+                    "country": "IN",
+                },
+            },
             metadata={
                 "order_id": str(order.id),
                 "user_id": str(current_user.id),
@@ -249,7 +256,7 @@ async def stripe_webhook(
     except stripe.error.SignatureVerificationError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid Stripe webhook signature.",
+            detail="Invalid webhook signature.",
         )
 
     event_type = event["type"]
