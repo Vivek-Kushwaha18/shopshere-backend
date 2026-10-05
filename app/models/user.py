@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from app.models.order import Order
     from app.models.payment import Payment
     from app.models.wishlist import Wishlist
+    from app.models.review import Review 
 
 class User(Base):
     __tablename__ = "users"
@@ -159,4 +160,15 @@ class User(Base):
         "Wishlist",
         back_populates="user",
         cascade="all, delete-orphan",
+    )
+
+
+    #==========================================================
+    # CUSTOMER REVIEW
+    #==========================================================
+
+    reviews: Mapped[list["Review"]] = relationship(
+       "Review",
+       back_populates="user",
+       cascade="all, delete-orphan",
     )

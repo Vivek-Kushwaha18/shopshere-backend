@@ -42,6 +42,7 @@ from app.models.address import Address
 from app.models.payment import Payment
 from app.models.wishlist import Wishlist 
 from app.models.coupon import Coupon
+from app.models.review import Review    
 # Add your models' metadata here
 target_metadata = Base.metadata
 
