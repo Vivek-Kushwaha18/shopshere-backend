@@ -12,8 +12,10 @@ from app.core.dependencies import (
 from app.database.database import get_db
 from app.models.coupon import Coupon
 from app.models.order import Order, OrderItem
+from app.models.payment import Payment
 from app.models.product import Product
 from app.models.product_image import ProductImage
+from app.models.shipment import Shipment
 from app.models.user import User
 from app.schemas.order import (
     OrderCreate,
@@ -44,9 +46,10 @@ async def create_order(
 ):
     payload = await request.json()
 
-    print(f"*** Request Payload ***")
+    print("*** Request Payload ***")
     print(json.dumps(payload, indent=2))
-    print(f"******")
+    print("******")
+
     if current_user.role != "customer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -58,9 +61,6 @@ async def create_order(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Order must contain at least one item.",
         )
-
-
-
 
     # -----------------------------------------------------
     # GET PRODUCTS
@@ -124,6 +124,7 @@ async def create_order(
 
     discount_amount = 0.0
     coupon_code = None
+    coupon = None
 
     if order_data.coupon_code:
         coupon_code = (
@@ -258,6 +259,15 @@ async def create_order(
     )
 
     # -----------------------------------------------------
+    # ORDER STATUS
+    # -----------------------------------------------------
+
+    if order_data.payment_method == "cod":
+        order_status = "processing"
+    else:
+        order_status = "pending"
+
+    # -----------------------------------------------------
     # CREATE ORDER
     # -----------------------------------------------------
 
@@ -266,7 +276,7 @@ async def create_order(
         total_amount=round(total_amount, 2),
         discount_amount=round(discount_amount, 2),
         coupon_code=coupon_code,
-        status="pending",
+        status=order_status,
         payment_status="pending",
         shipping_address=order_data.shipping_address,
     )
@@ -304,6 +314,59 @@ async def create_order(
 
         # Reduce stock
         product.stock -= item_data.quantity
+
+    await db.flush()
+
+    # =====================================================
+    # CASH ON DELIVERY
+    # =====================================================
+
+    if order_data.payment_method == "cod":
+
+        # -------------------------------------------------
+        # CREATE COD PAYMENT RECORD
+        # -------------------------------------------------
+
+        cod_payment = Payment(
+            order_id=order.id,
+            user_id=current_user.id,
+            amount=round(total_amount, 2),
+            currency="INR",
+            payment_method="cod",
+            status="pending",
+        )
+
+        db.add(cod_payment)
+
+        # -------------------------------------------------
+        # INCREMENT COUPON USAGE
+        # -------------------------------------------------
+
+        if coupon is not None:
+            coupon.used_count += 1
+
+        # -------------------------------------------------
+        # CREATE SHIPMENTS
+        # -------------------------------------------------
+
+        seller_ids = {
+            item.seller_id
+            for item in order_items
+        }
+
+        for seller_id in seller_ids:
+            shipment = Shipment(
+                order_id=order.id,
+                seller_id=seller_id,
+                tracking_number=None,
+                status="processing",
+            )
+
+            db.add(shipment)
+
+    # -----------------------------------------------------
+    # SAVE
+    # -----------------------------------------------------
 
     await db.commit()
 

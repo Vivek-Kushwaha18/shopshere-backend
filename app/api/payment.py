@@ -20,6 +20,7 @@ from app.models.coupon import Coupon
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment
 from app.models.product import Product
+from app.models.shipment import Shipment
 from app.models.user import User
 from app.schemas.payment import (
     PaymentIntentCreate,
@@ -293,7 +294,8 @@ async def stripe_webhook(
             #
             # If Stripe sends the same successful webhook
             # again after payment is already marked paid,
-            # coupon usage will NOT increase again.
+            # coupon usage and shipments will NOT be created
+            # again.
             # -------------------------------------------------
 
             if payment.status != "paid":
@@ -315,6 +317,54 @@ async def stripe_webhook(
                 if order:
                     order.payment_status = "paid"
                     order.status = "processing"
+
+                    # -------------------------------------------------
+                    # GET ORDER ITEMS
+                    # -------------------------------------------------
+
+                    order_items_result = await db.execute(
+                        select(OrderItem).where(
+                            OrderItem.order_id == order.id
+                        )
+                    )
+
+                    order_items = (
+                        order_items_result.scalars().all()
+                    )
+
+                    # -------------------------------------------------
+                    # GET UNIQUE SELLERS
+                    # -------------------------------------------------
+
+                    seller_ids = {
+                        item.seller_id
+                        for item in order_items
+                    }
+
+                    # -------------------------------------------------
+                    # CREATE ONE SHIPMENT FOR EACH SELLER
+                    # -------------------------------------------------
+
+                    for seller_id in seller_ids:
+                        existing_shipment_result = await db.execute(
+                            select(Shipment).where(
+                                Shipment.order_id == order.id,
+                                Shipment.seller_id == seller_id,
+                            )
+                        )
+
+                        existing_shipment = (
+                            existing_shipment_result.scalar_one_or_none()
+                        )
+
+                        if not existing_shipment:
+                            shipment = Shipment(
+                                order_id=order.id,
+                                seller_id=seller_id,
+                                status="processing",
+                            )
+
+                            db.add(shipment)
 
                     # -------------------------------------------------
                     # INCREASE COUPON USAGE

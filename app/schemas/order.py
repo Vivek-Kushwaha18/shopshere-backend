@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -31,6 +32,8 @@ class OrderCreate(BaseModel):
         default=None,
         max_length=50,
     )
+
+    payment_method: Literal["stripe", "cod"] = "stripe"
 
 
 # =========================================================

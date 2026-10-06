@@ -90,6 +90,12 @@ class Order(Base):
         back_populates="order",
         cascade="all, delete-orphan",
     )
+    shipments = relationship(
+        "Shipment",
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
+
 
 
 class OrderItem(Base):

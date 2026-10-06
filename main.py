@@ -14,6 +14,8 @@ from app.api.reports import router as reports_router
 from app.api.coupon import router as coupon_router
 from app.api.customer_coupon import router as customer_coupon_router
 from app.api.review import router as review_router
+from app.api.shipment import router as shipment_router
+
 
 app = FastAPI(
     title="ShopSphere API",
@@ -66,6 +68,9 @@ app.include_router(reports_router)
 app.include_router(coupon_router)
 app.include_router(customer_coupon_router)
 app.include_router(review_router)
+app.include_router(shipment_router)
+
+
 # ============================================================
 # ROOT
 # ============================================================
