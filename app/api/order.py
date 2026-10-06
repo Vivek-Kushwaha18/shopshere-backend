@@ -1,6 +1,8 @@
 import json
 from datetime import datetime
 
+import stripe
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -242,7 +244,7 @@ async def create_order(
 
         # -------------------------------------------------
         # DISCOUNT CANNOT EXCEED SUBTOTAL
-        # -----------------------------------------------------
+        # -------------------------------------------------
 
         discount_amount = min(
             discount_amount,
@@ -966,6 +968,318 @@ async def update_seller_order_status(
 
 
 # =========================================================
+# CUSTOMER - CANCEL ORDER
+# =========================================================
+
+@router.patch(
+    "/{order_id}/cancel",
+)
+async def cancel_order(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # -----------------------------------------------------
+    # CUSTOMER ONLY
+    # -----------------------------------------------------
+
+    if current_user.role != "customer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only customers can cancel orders.",
+        )
+
+    # -----------------------------------------------------
+    # GET ORDER
+    # -----------------------------------------------------
+
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.id == order_id,
+            Order.user_id == current_user.id,
+        )
+        .with_for_update()
+    )
+
+    order = result.scalar_one_or_none()
+
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order not found.",
+        )
+
+    # -----------------------------------------------------
+    # CHECK ORDER STATUS
+    # -----------------------------------------------------
+
+    if order.status not in {
+        "pending",
+        "processing",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Order cannot be cancelled because "
+                f"its current status is '{order.status}'."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # GET SHIPMENTS
+    # -----------------------------------------------------
+
+    shipments_result = await db.execute(
+        select(Shipment).where(
+            Shipment.order_id == order.id
+        )
+    )
+
+    shipments = shipments_result.scalars().all()
+
+    # -----------------------------------------------------
+    # DO NOT CANCEL AFTER SHIPPING
+    # -----------------------------------------------------
+
+    for shipment in shipments:
+        if shipment.status in {
+            "shipped",
+            "out_for_delivery",
+            "delivered",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "This order cannot be cancelled because "
+                    "the shipment has already been shipped."
+                ),
+            )
+
+    # -----------------------------------------------------
+    # GET ORDER ITEMS
+    # -----------------------------------------------------
+
+    items_result = await db.execute(
+        select(OrderItem).where(
+            OrderItem.order_id == order.id
+        )
+    )
+
+    order_items = items_result.scalars().all()
+
+    # -----------------------------------------------------
+    # GET PAYMENT
+    # -----------------------------------------------------
+
+    payment_result = await db.execute(
+        select(Payment)
+        .where(
+            Payment.order_id == order.id,
+            Payment.user_id == current_user.id,
+        )
+        .order_by(
+            Payment.created_at.desc()
+        )
+    )
+
+    payment = payment_result.scalars().first()
+
+    # -----------------------------------------------------
+    # HANDLE STRIPE PAYMENT
+    # -----------------------------------------------------
+
+    if payment and payment.payment_method == "stripe":
+
+        # -------------------------------------------------
+        # PAID STRIPE PAYMENT → REFUND
+        # -------------------------------------------------
+
+        if payment.status == "paid":
+
+            if not payment.stripe_payment_intent_id:
+                await db.rollback()
+
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "Stripe payment information "
+                        "is missing."
+                    ),
+                )
+
+            try:
+                refund = stripe.Refund.create(
+                    payment_intent=(
+                        payment.stripe_payment_intent_id
+                    )
+                )
+
+            except stripe.error.StripeError as exc:
+                await db.rollback()
+
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=(
+                        "Unable to process the Stripe refund: "
+                        f"{str(exc)}"
+                    ),
+                )
+
+            payment.status = "refunded"
+            payment.transaction_id = refund.id
+
+            order.payment_status = "refunded"
+
+        # -------------------------------------------------
+        # PENDING STRIPE PAYMENT → CANCEL PAYMENT INTENT
+        # -------------------------------------------------
+
+        elif payment.status == "pending":
+
+            if payment.stripe_payment_intent_id:
+
+                try:
+                    payment_intent = (
+                        stripe.PaymentIntent.retrieve(
+                            payment.stripe_payment_intent_id
+                        )
+                    )
+
+                    if payment_intent.status in {
+                        "requires_payment_method",
+                        "requires_confirmation",
+                        "requires_action",
+                    }:
+                        stripe.PaymentIntent.cancel(
+                            payment.stripe_payment_intent_id
+                        )
+
+                except stripe.error.StripeError as exc:
+                    await db.rollback()
+
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=(
+                            "Unable to cancel the Stripe payment: "
+                            f"{str(exc)}"
+                        ),
+                    )
+
+            payment.status = "cancelled"
+
+            order.payment_status = "cancelled"
+
+        # -------------------------------------------------
+        # OTHER STRIPE PAYMENT STATUS
+        # -------------------------------------------------
+
+        elif payment.status in {
+            "failed",
+            "cancelled",
+            "refunded",
+        }:
+            order.payment_status = payment.status
+
+    # -----------------------------------------------------
+    # HANDLE COD PAYMENT
+    # -----------------------------------------------------
+
+    elif payment and payment.payment_method == "cod":
+
+        payment.status = "cancelled"
+
+        order.payment_status = "cancelled"
+
+    # -----------------------------------------------------
+    # NO PAYMENT RECORD
+    # -----------------------------------------------------
+
+    elif not payment:
+
+        order.payment_status = "cancelled"
+
+    # -----------------------------------------------------
+    # RESTORE STOCK
+    # -----------------------------------------------------
+
+    for order_item in order_items:
+
+        product_result = await db.execute(
+            select(Product)
+            .where(
+                Product.id == order_item.product_id
+            )
+            .with_for_update()
+        )
+
+        product = product_result.scalar_one_or_none()
+
+        if product:
+            product.stock += order_item.quantity
+
+    # -----------------------------------------------------
+    # RESTORE COUPON USAGE
+    # -----------------------------------------------------
+
+    should_reduce_coupon = False
+
+    if order.coupon_code and payment:
+
+        if payment.payment_method == "cod":
+            should_reduce_coupon = True
+
+        elif (
+            payment.payment_method == "stripe"
+            and payment.status == "refunded"
+        ):
+            should_reduce_coupon = True
+
+    if should_reduce_coupon:
+
+        coupon_result = await db.execute(
+            select(Coupon)
+            .where(
+                Coupon.code == order.coupon_code
+            )
+            .with_for_update()
+        )
+
+        coupon = coupon_result.scalar_one_or_none()
+
+        if coupon and coupon.used_count > 0:
+            coupon.used_count -= 1
+
+    # -----------------------------------------------------
+    # CANCEL ORDER
+    # -----------------------------------------------------
+
+    order.status = "cancelled"
+
+    # -----------------------------------------------------
+    # DELETE PROCESSING SHIPMENTS
+    # -----------------------------------------------------
+
+    for shipment in shipments:
+        await db.delete(shipment)
+
+    # -----------------------------------------------------
+    # SAVE
+    # -----------------------------------------------------
+
+    await db.commit()
+
+    await db.refresh(order)
+
+    return {
+        "message": "Order cancelled successfully.",
+        "order_id": order.id,
+        "status": order.status,
+        "payment_status": order.payment_status,
+    }
+
+
+# =========================================================
 # GET SINGLE ORDER
 # =========================================================
 
@@ -993,6 +1307,7 @@ async def get_order(
         )
 
     if current_user.role == "customer":
+
         if order.user_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -1000,6 +1315,7 @@ async def get_order(
             )
 
     elif current_user.role == "seller":
+
         seller_item_result = await db.execute(
             select(OrderItem).where(
                 OrderItem.order_id == order.id,
@@ -1007,25 +1323,36 @@ async def get_order(
             )
         )
 
-        seller_item = seller_item_result.scalar_one_or_none()
+        seller_item = (
+            seller_item_result.scalar_one_or_none()
+        )
 
         if not seller_item:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You can only view orders containing your products.",
+                detail=(
+                    "You can only view orders "
+                    "containing your products."
+                ),
             )
 
     elif current_user.role != "admin":
+
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not allowed to view this order.",
         )
+
+    # -----------------------------------------------------
+    # GET ORDER ITEMS
+    # -----------------------------------------------------
 
     items_query = select(OrderItem).where(
         OrderItem.order_id == order.id
     )
 
     if current_user.role == "seller":
+
         items_query = items_query.where(
             OrderItem.seller_id == current_user.id
         )
@@ -1035,6 +1362,10 @@ async def get_order(
     )
 
     items = items_result.scalars().all()
+
+    # -----------------------------------------------------
+    # GET PRODUCTS
+    # -----------------------------------------------------
 
     product_ids = [
         item.product_id
@@ -1054,6 +1385,10 @@ async def get_order(
         for product in products
     }
 
+    # -----------------------------------------------------
+    # GET PRIMARY IMAGES
+    # -----------------------------------------------------
+
     image_result = await db.execute(
         select(ProductImage).where(
             ProductImage.product_id.in_(product_ids),
@@ -1067,6 +1402,10 @@ async def get_order(
         image.product_id: image.image_url
         for image in primary_images
     }
+
+    # -----------------------------------------------------
+    # RETURN ORDER
+    # -----------------------------------------------------
 
     return OrderResponse(
         id=order.id,
