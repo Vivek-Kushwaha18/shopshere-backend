@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -29,6 +31,59 @@ router = APIRouter(
     prefix="/api/products",
     tags=["Product Variants"],
 )
+
+
+# =========================================================
+# GENERATE UNIQUE SKU
+# =========================================================
+
+async def generate_unique_sku(
+    db: AsyncSession,
+    requested_sku: str | None = None,
+    exclude_variant_id: int | None = None,
+) -> str:
+
+    if requested_sku:
+        base_sku = requested_sku.strip()
+    else:
+        base_sku = "SKU"
+
+    if not base_sku:
+        base_sku = "SKU"
+
+    result = await db.execute(
+        select(ProductVariant.id).where(
+            ProductVariant.sku == base_sku,
+            (
+                ProductVariant.id != exclude_variant_id
+                if exclude_variant_id is not None
+                else True
+            ),
+        )
+    )
+
+    existing_sku = result.scalar_one_or_none()
+
+    if existing_sku is None:
+        return base_sku
+
+    while True:
+
+        unique_sku = (
+            f"{base_sku}-{uuid.uuid4().hex[:8].upper()}"
+        )
+
+        result = await db.execute(
+            select(ProductVariant.id).where(
+                ProductVariant.sku == unique_sku
+            )
+        )
+
+        existing_sku = result.scalar_one_or_none()
+
+        if existing_sku is None:
+            return unique_sku
+
 
 # =========================================================
 # CHECK PRODUCT ACCESS
@@ -259,28 +314,14 @@ async def create_variant(
         db,
     )
 
-    if data.sku:
-
-        result = await db.execute(
-            select(ProductVariant).where(
-                ProductVariant.sku == data.sku
-            )
-        )
-
-        existing_sku = (
-            result.scalar_one_or_none()
-        )
-
-        if existing_sku is not None:
-
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="SKU already exists",
-            )
+    unique_sku = await generate_unique_sku(
+        db=db,
+        requested_sku=data.sku,
+    )
 
     variant = ProductVariant(
         product_id=product.id,
-        sku=data.sku,
+        sku=unique_sku,
         price=data.price,
         original_price=data.original_price,
         stock=data.stock,
@@ -479,25 +520,13 @@ async def update_variant(
 
     if data.sku is not None:
 
-        result = await db.execute(
-            select(ProductVariant).where(
-                ProductVariant.sku == data.sku,
-                ProductVariant.id != variant.id,
-            )
+        unique_sku = await generate_unique_sku(
+            db=db,
+            requested_sku=data.sku,
+            exclude_variant_id=variant.id,
         )
 
-        existing_sku = (
-            result.scalar_one_or_none()
-        )
-
-        if existing_sku is not None:
-
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="SKU already exists",
-            )
-
-        variant.sku = data.sku
+        variant.sku = unique_sku
 
     if data.price is not None:
         variant.price = data.price

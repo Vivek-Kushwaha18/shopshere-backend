@@ -25,6 +25,11 @@ router = APIRouter(
     tags=["Product Options"],
 )
 
+
+# =====================================================
+# GET PRODUCT FOR OWNER
+# =====================================================
+
 async def get_product_for_owner(
     product_id: int,
     current_user: User,
@@ -58,6 +63,10 @@ async def get_product_for_owner(
     return product
 
 
+# =====================================================
+# CREATE OPTION GROUP
+# =====================================================
+
 @router.post(
     "/{product_id}/options",
     response_model=ProductOptionGroupResponse,
@@ -74,16 +83,45 @@ async def create_option_group(
     ),
 ):
 
+    # -------------------------------------------------
+    # CHECK PRODUCT
+    # -------------------------------------------------
+
     product = await get_product_for_owner(
         product_id,
         current_user,
         db,
     )
 
+    # -------------------------------------------------
+    # CLEAN OPTION GROUP NAME
+    # -------------------------------------------------
+
+    option_name = data.name.strip()
+
+    if not option_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Option group name is required",
+        )
+
+    # -------------------------------------------------
+    # CHECK DUPLICATE OPTION GROUP
+    #
+    # Example:
+    # Color
+    # color
+    # COLOR
+    #
+    # All are treated as the same option.
+    # -------------------------------------------------
+
     result = await db.execute(
         select(ProductOptionGroup).where(
             ProductOptionGroup.product_id == product.id,
-            ProductOptionGroup.name == data.name,
+            ProductOptionGroup.name.ilike(
+                option_name
+            ),
         )
     )
 
@@ -92,12 +130,71 @@ async def create_option_group(
     if existing_group is not None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This option group already exists",
+            detail=(
+                f'The option group "{option_name}" '
+                "already exists for this product."
+            ),
         )
+
+    # -------------------------------------------------
+    # VALIDATE OPTION VALUES
+    # -------------------------------------------------
+
+    if not data.values:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f'At least one value is required '
+                f'for "{option_name}".'
+            ),
+        )
+
+    cleaned_values = []
+
+    existing_value_names = set()
+
+    for value_data in data.values:
+
+        value = value_data.value.strip()
+
+        if not value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f'Option "{option_name}" '
+                    "contains an empty value."
+                ),
+            )
+
+        normalized_value = value.lower()
+
+        if normalized_value in existing_value_names:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f'Duplicate value "{value}" '
+                    f'found in option "{option_name}".'
+                ),
+            )
+
+        existing_value_names.add(
+            normalized_value
+        )
+
+        cleaned_values.append(
+            (
+                value,
+                value_data.sort_order,
+            )
+        )
+
+    # -------------------------------------------------
+    # CREATE OPTION GROUP
+    # -------------------------------------------------
 
     option_group = ProductOptionGroup(
         product_id=product.id,
-        name=data.name,
+        name=option_name,
         sort_order=data.sort_order,
     )
 
@@ -105,22 +202,47 @@ async def create_option_group(
 
     await db.flush()
 
-    for value_data in data.values:
+    # -------------------------------------------------
+    # CREATE OPTION VALUES
+    # -------------------------------------------------
+
+    for value, sort_order in cleaned_values:
 
         option_value = ProductOptionValue(
             option_group_id=option_group.id,
-            value=value_data.value,
-            sort_order=value_data.sort_order,
+            value=value,
+            sort_order=sort_order,
         )
 
         db.add(option_value)
 
+    # -------------------------------------------------
+    # SAVE
+    # -------------------------------------------------
+
     await db.commit()
 
-    await db.refresh(option_group)
+    # -------------------------------------------------
+    # LOAD CREATED GROUP WITH VALUES
+    # -------------------------------------------------
 
-    return option_group
+    result = await db.execute(
+        select(ProductOptionGroup).where(
+            ProductOptionGroup.id ==
+            option_group.id
+        )
+    )
 
+    created_group = (
+        result.scalar_one()
+    )
+
+    return created_group
+
+
+# =====================================================
+# GET PRODUCT OPTIONS
+# =====================================================
 
 @router.get(
     "/{product_id}/options",
@@ -132,6 +254,10 @@ async def get_product_options(
         get_db
     ),
 ):
+
+    # -------------------------------------------------
+    # CHECK PRODUCT
+    # -------------------------------------------------
 
     result = await db.execute(
         select(Product).where(
@@ -148,10 +274,15 @@ async def get_product_options(
             detail="Product not found",
         )
 
+    # -------------------------------------------------
+    # GET OPTION GROUPS
+    # -------------------------------------------------
+
     result = await db.execute(
         select(ProductOptionGroup)
         .where(
-            ProductOptionGroup.product_id == product_id
+            ProductOptionGroup.product_id ==
+            product_id
         )
         .order_by(
             ProductOptionGroup.sort_order,
@@ -163,6 +294,10 @@ async def get_product_options(
 
     return groups
 
+
+# =====================================================
+# DELETE OPTION GROUP
+# =====================================================
 
 @router.delete(
     "/options/{option_group_id}",
@@ -177,13 +312,20 @@ async def delete_option_group(
     ),
 ):
 
+    # -------------------------------------------------
+    # FIND OPTION GROUP
+    # -------------------------------------------------
+
     result = await db.execute(
         select(ProductOptionGroup).where(
-            ProductOptionGroup.id == option_group_id
+            ProductOptionGroup.id ==
+            option_group_id
         )
     )
 
-    option_group = result.scalar_one_or_none()
+    option_group = (
+        result.scalar_one_or_none()
+    )
 
     if option_group is None:
         raise HTTPException(
@@ -191,11 +333,23 @@ async def delete_option_group(
             detail="Option group not found",
         )
 
+    # -------------------------------------------------
+    # CHECK PRODUCT OWNER
+    # -------------------------------------------------
+
     await get_product_for_owner(
         option_group.product_id,
         current_user,
         db,
     )
+
+    # -------------------------------------------------
+    # DELETE
+    #
+    # ProductOptionValue records should be deleted
+    # automatically if the relationship has
+    # cascade="all, delete-orphan".
+    # -------------------------------------------------
 
     await db.delete(option_group)
 
