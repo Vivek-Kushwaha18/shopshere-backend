@@ -125,6 +125,20 @@ class Product(Base):
         lazy="selectin",
     )
 
+    option_groups = relationship(
+        "ProductOptionGroup",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    variants = relationship(
+        "ProductVariant",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
     wishlists = relationship(
         "Wishlist",
         back_populates="product",

@@ -21,14 +21,29 @@ class CartItem(Base):
     )
 
     cart_id: Mapped[int] = mapped_column(
-        ForeignKey("carts.id", ondelete="CASCADE"),
+        ForeignKey(
+            "carts.id",
+            ondelete="CASCADE",
+        ),
         nullable=False,
         index=True,
     )
 
     product_id: Mapped[int] = mapped_column(
-        ForeignKey("products.id", ondelete="CASCADE"),
+        ForeignKey(
+            "products.id",
+            ondelete="CASCADE",
+        ),
         nullable=False,
+        index=True,
+    )
+
+    variant_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "product_variants.id",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
         index=True,
     )
 
@@ -60,10 +75,15 @@ class CartItem(Base):
         "Product",
     )
 
+    variant = relationship(
+        "ProductVariant",
+    )
+
     __table_args__ = (
         UniqueConstraint(
             "cart_id",
             "product_id",
-            name="uq_cart_item_cart_product",
+            "variant_id",
+            name="uq_cart_item_cart_product_variant",
         ),
     )

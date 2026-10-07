@@ -17,6 +17,10 @@ from app.models.order import Order, OrderItem
 from app.models.payment import Payment
 from app.models.product import Product
 from app.models.product_image import ProductImage
+from app.models.product_option_group import ProductOptionGroup
+from app.models.product_option_value import ProductOptionValue
+from app.models.product_variant import ProductVariant
+from app.models.product_variant_value import ProductVariantValue
 from app.models.shipment import Shipment
 from app.models.user import User
 from app.schemas.order import (
@@ -29,6 +33,262 @@ router = APIRouter(
     prefix="/orders",
     tags=["Orders"],
 )
+
+
+# =========================================================
+# ORDER ITEM RESPONSE DATA
+# =========================================================
+
+async def build_order_items_response(
+    db: AsyncSession,
+    items: list[OrderItem],
+) -> list[dict]:
+    if not items:
+        return []
+
+    product_ids = list(
+        {
+            item.product_id
+            for item in items
+        }
+    )
+
+    variant_ids = list(
+        {
+            item.variant_id
+            for item in items
+            if item.variant_id is not None
+        }
+    )
+
+    # -----------------------------------------------------
+    # GET PRODUCTS
+    # -----------------------------------------------------
+
+    products_result = await db.execute(
+        select(Product).where(
+            Product.id.in_(product_ids)
+        )
+    )
+
+    products = products_result.scalars().all()
+
+    products_by_id = {
+        product.id: product
+        for product in products
+    }
+
+    # -----------------------------------------------------
+    # GET VARIANTS
+    # -----------------------------------------------------
+
+    variants_by_id: dict[int, ProductVariant] = {}
+
+    if variant_ids:
+        variants_result = await db.execute(
+            select(ProductVariant).where(
+                ProductVariant.id.in_(variant_ids)
+            )
+        )
+
+        variants = variants_result.scalars().all()
+
+        variants_by_id = {
+            variant.id: variant
+            for variant in variants
+        }
+
+    # -----------------------------------------------------
+    # GET VARIANT OPTIONS
+    # -----------------------------------------------------
+
+    variant_options_by_variant_id: dict[
+        int,
+        list[dict],
+    ] = {
+        variant_id: []
+        for variant_id in variant_ids
+    }
+
+    if variant_ids:
+        option_result = await db.execute(
+            select(
+                ProductVariantValue.variant_id,
+                ProductOptionGroup.name,
+                ProductOptionValue.value,
+            )
+            .join(
+                ProductOptionValue,
+                ProductOptionValue.id
+                == ProductVariantValue.option_value_id,
+            )
+            .join(
+                ProductOptionGroup,
+                ProductOptionGroup.id
+                == ProductOptionValue.option_group_id,
+            )
+            .where(
+                ProductVariantValue.variant_id.in_(
+                    variant_ids
+                )
+            )
+            .order_by(
+                ProductOptionGroup.sort_order,
+                ProductOptionValue.sort_order,
+            )
+        )
+
+        option_rows = option_result.all()
+
+        for (
+            variant_id,
+            group_name,
+            value,
+        ) in option_rows:
+            variant_options_by_variant_id[
+                variant_id
+            ].append(
+                {
+                    "group_name": group_name,
+                    "value": value,
+                }
+            )
+
+    # -----------------------------------------------------
+    # GET VARIANT PRIMARY IMAGES
+    # -----------------------------------------------------
+
+    variant_images_by_variant_id: dict[
+        int,
+        str,
+    ] = {}
+
+    if variant_ids:
+        variant_image_result = await db.execute(
+            select(ProductImage)
+            .where(
+                ProductImage.variant_id.in_(
+                    variant_ids
+                ),
+                ProductImage.is_primary.is_(True),
+            )
+            .order_by(
+                ProductImage.sort_order
+            )
+        )
+
+        variant_images = (
+            variant_image_result.scalars().all()
+        )
+
+        for image in variant_images:
+            if image.variant_id not in (
+                variant_images_by_variant_id
+            ):
+                variant_images_by_variant_id[
+                    image.variant_id
+                ] = image.image_url
+
+    # -----------------------------------------------------
+    # GET PRODUCT PRIMARY IMAGES
+    # -----------------------------------------------------
+
+    product_images_result = await db.execute(
+        select(ProductImage)
+        .where(
+            ProductImage.product_id.in_(
+                product_ids
+            ),
+            ProductImage.variant_id.is_(None),
+            ProductImage.is_primary.is_(True),
+        )
+        .order_by(
+            ProductImage.sort_order
+        )
+    )
+
+    product_images = (
+        product_images_result.scalars().all()
+    )
+
+    images_by_product_id: dict[
+        int,
+        str,
+    ] = {}
+
+    for image in product_images:
+        if image.product_id not in (
+            images_by_product_id
+        ):
+            images_by_product_id[
+                image.product_id
+            ] = image.image_url
+
+    # -----------------------------------------------------
+    # BUILD RESPONSE
+    # -----------------------------------------------------
+
+    response = []
+
+    for item in items:
+        product = products_by_id.get(
+            item.product_id
+        )
+
+        if not product:
+            continue
+
+        variant = None
+
+        if item.variant_id is not None:
+            variant = variants_by_id.get(
+                item.variant_id
+            )
+
+        product_image = (
+            variant_images_by_variant_id.get(
+                item.variant_id
+            )
+            if item.variant_id is not None
+            else None
+        )
+
+        if not product_image:
+            product_image = (
+                images_by_product_id.get(
+                    item.product_id
+                )
+            )
+
+        response.append(
+            {
+                "id": item.id,
+                "order_id": item.order_id,
+                "product_id": item.product_id,
+                "variant_id": item.variant_id,
+                "seller_id": item.seller_id,
+                "product_name": product.name,
+                "product_image": product_image,
+                "variant_sku": (
+                    variant.sku
+                    if variant
+                    else None
+                ),
+                "variant_options": (
+                    variant_options_by_variant_id.get(
+                        item.variant_id,
+                        [],
+                    )
+                    if item.variant_id is not None
+                    else []
+                ),
+                "quantity": item.quantity,
+                "price": item.price,
+                "total": item.total,
+            }
+        )
+
+    return response
 
 
 # =========================================================
@@ -74,7 +334,8 @@ async def create_order(
     ]
 
     result = await db.execute(
-        select(Product).where(
+        select(Product)
+        .where(
             Product.id.in_(product_ids),
             Product.is_deleted.is_(False),
             Product.is_active.is_(True),
@@ -88,33 +349,160 @@ async def create_order(
         for product in products
     }
 
-    if len(products_by_id) != len(set(product_ids)):
+    if len(products_by_id) != len(
+        set(product_ids)
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="One or more products were not found.",
         )
 
     # -----------------------------------------------------
-    # CALCULATE SUBTOTAL
+    # GET ACTIVE VARIANTS
+    # -----------------------------------------------------
+
+    variant_ids = [
+        item.variant_id
+        for item in order_data.items
+        if item.variant_id is not None
+    ]
+
+    variants_by_id: dict[int, ProductVariant] = {}
+
+    if variant_ids:
+        variant_result = await db.execute(
+            select(ProductVariant)
+            .where(
+                ProductVariant.id.in_(variant_ids),
+                ProductVariant.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+
+        variants = variant_result.scalars().all()
+
+        variants_by_id = {
+            variant.id: variant
+            for variant in variants
+        }
+
+        if len(variants_by_id) != len(
+            set(variant_ids)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "One or more selected product "
+                    "variants were not found."
+                ),
+            )
+
+    # -----------------------------------------------------
+    # VALIDATE VARIANTS AND CALCULATE SUBTOTAL
     # -----------------------------------------------------
 
     subtotal = 0.0
 
     for item_data in order_data.items:
-        product = products_by_id[item_data.product_id]
+        product = products_by_id[
+            item_data.product_id
+        ]
 
-        if product.stock < item_data.quantity:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Not enough stock for product "
-                    f"'{product.name}'. Available stock: "
-                    f"{product.stock}."
-                ),
+        active_variants_result = await db.execute(
+            select(ProductVariant.id)
+            .where(
+                ProductVariant.product_id
+                == product.id,
+                ProductVariant.is_active.is_(True),
+            )
+        )
+
+        active_variant_ids = (
+            active_variants_result.scalars().all()
+        )
+
+        # -------------------------------------------------
+        # PRODUCT HAS ACTIVE VARIANTS
+        # -------------------------------------------------
+
+        if active_variant_ids:
+
+            if item_data.variant_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Please select a variant for "
+                        f"product '{product.name}'."
+                    ),
+                )
+
+            variant = variants_by_id.get(
+                item_data.variant_id
+            )
+
+            if not variant:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=(
+                        "Selected product variant "
+                        "was not found."
+                    ),
+                )
+
+            if variant.product_id != product.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"The selected variant does not "
+                        f"belong to product '{product.name}'."
+                    ),
+                )
+
+            if variant.stock < item_data.quantity:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Not enough stock for the selected "
+                        f"variant of '{product.name}'. "
+                        f"Available stock: {variant.stock}."
+                    ),
+                )
+
+            item_price = float(
+                variant.price
+            )
+
+        # -------------------------------------------------
+        # PRODUCT WITHOUT VARIANTS
+        # -------------------------------------------------
+
+        else:
+
+            if item_data.variant_id is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Product '{product.name}' does not "
+                        f"have selectable variants."
+                    ),
+                )
+
+            if product.stock < item_data.quantity:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Not enough stock for product "
+                        f"'{product.name}'. Available stock: "
+                        f"{product.stock}."
+                    ),
+                )
+
+            item_price = float(
+                product.price
             )
 
         item_total = (
-            float(product.price)
+            item_price
             * item_data.quantity
         )
 
@@ -145,7 +533,9 @@ async def create_order(
             )
         )
 
-        coupon = coupon_result.scalar_one_or_none()
+        coupon = (
+            coupon_result.scalar_one_or_none()
+        )
 
         if not coupon:
             raise HTTPException(
@@ -153,19 +543,11 @@ async def create_order(
                 detail="Invalid coupon code.",
             )
 
-        # -------------------------------------------------
-        # CHECK ACTIVE
-        # -------------------------------------------------
-
         if not coupon.is_active:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="This coupon is inactive.",
             )
-
-        # -------------------------------------------------
-        # CHECK DATES
-        # -------------------------------------------------
 
         now = datetime.utcnow()
 
@@ -181,26 +563,24 @@ async def create_order(
                 detail="This coupon has expired.",
             )
 
-        # -------------------------------------------------
-        # CHECK USAGE LIMIT
-        # -------------------------------------------------
-
         if (
             coupon.usage_limit is not None
-            and coupon.used_count >= coupon.usage_limit
+            and coupon.used_count
+            >= coupon.usage_limit
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This coupon usage limit has been reached.",
+                detail=(
+                    "This coupon usage limit "
+                    "has been reached."
+                ),
             )
-
-        # -------------------------------------------------
-        # CHECK MINIMUM ORDER AMOUNT
-        # -------------------------------------------------
 
         if (
             subtotal
-            < float(coupon.minimum_order_amount)
+            < float(
+                coupon.minimum_order_amount
+            )
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -210,14 +590,12 @@ async def create_order(
                 ),
             )
 
-        # -------------------------------------------------
-        # CALCULATE DISCOUNT
-        # -------------------------------------------------
-
         if coupon.discount_type == "percentage":
             discount_amount = (
                 subtotal
-                * float(coupon.discount_value)
+                * float(
+                    coupon.discount_value
+                )
                 / 100
             )
 
@@ -232,19 +610,13 @@ async def create_order(
                 detail="Invalid coupon discount type.",
             )
 
-        # -------------------------------------------------
-        # MAXIMUM DISCOUNT
-        # -------------------------------------------------
-
         if coupon.maximum_discount is not None:
             discount_amount = min(
                 discount_amount,
-                float(coupon.maximum_discount),
+                float(
+                    coupon.maximum_discount
+                ),
             )
-
-        # -------------------------------------------------
-        # DISCOUNT CANNOT EXCEED SUBTOTAL
-        # -------------------------------------------------
 
         discount_amount = min(
             discount_amount,
@@ -275,12 +647,20 @@ async def create_order(
 
     order = Order(
         user_id=current_user.id,
-        total_amount=round(total_amount, 2),
-        discount_amount=round(discount_amount, 2),
+        total_amount=round(
+            total_amount,
+            2,
+        ),
+        discount_amount=round(
+            discount_amount,
+            2,
+        ),
         coupon_code=coupon_code,
         status=order_status,
         payment_status="pending",
-        shipping_address=order_data.shipping_address,
+        shipping_address=(
+            order_data.shipping_address
+        ),
     )
 
     db.add(order)
@@ -294,28 +674,70 @@ async def create_order(
     order_items = []
 
     for item_data in order_data.items:
-        product = products_by_id[item_data.product_id]
+        product = products_by_id[
+            item_data.product_id
+        ]
 
-        item_total = (
-            float(product.price)
-            * item_data.quantity
-        )
+        variant = None
+
+        if item_data.variant_id is not None:
+            variant = variants_by_id.get(
+                item_data.variant_id
+            )
+
+            if not variant:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=(
+                        "Selected product variant "
+                        "was not found."
+                    ),
+                )
+
+            item_price = float(
+                variant.price
+            )
+
+            item_total = (
+                item_price
+                * item_data.quantity
+            )
+
+            variant.stock -= (
+                item_data.quantity
+            )
+
+        else:
+            item_price = float(
+                product.price
+            )
+
+            item_total = (
+                item_price
+                * item_data.quantity
+            )
+
+            product.stock -= (
+                item_data.quantity
+            )
 
         order_item = OrderItem(
             order_id=order.id,
             product_id=product.id,
+            variant_id=(
+                variant.id
+                if variant
+                else None
+            ),
             seller_id=product.seller_id,
             quantity=item_data.quantity,
-            price=product.price,
+            price=item_price,
             total=item_total,
         )
 
         db.add(order_item)
 
         order_items.append(order_item)
-
-        # Reduce stock
-        product.stock -= item_data.quantity
 
     await db.flush()
 
@@ -325,14 +747,13 @@ async def create_order(
 
     if order_data.payment_method == "cod":
 
-        # -------------------------------------------------
-        # CREATE COD PAYMENT RECORD
-        # -------------------------------------------------
-
         cod_payment = Payment(
             order_id=order.id,
             user_id=current_user.id,
-            amount=round(total_amount, 2),
+            amount=round(
+                total_amount,
+                2,
+            ),
             currency="INR",
             payment_method="cod",
             status="pending",
@@ -340,16 +761,8 @@ async def create_order(
 
         db.add(cod_payment)
 
-        # -------------------------------------------------
-        # INCREMENT COUPON USAGE
-        # -------------------------------------------------
-
         if coupon is not None:
             coupon.used_count += 1
-
-        # -------------------------------------------------
-        # CREATE SHIPMENTS
-        # -------------------------------------------------
 
         seller_ids = {
             item.seller_id
@@ -375,22 +788,15 @@ async def create_order(
     await db.refresh(order)
 
     # -----------------------------------------------------
-    # GET PRIMARY PRODUCT IMAGES
+    # BUILD ORDER ITEMS RESPONSE
     # -----------------------------------------------------
 
-    image_result = await db.execute(
-        select(ProductImage).where(
-            ProductImage.product_id.in_(product_ids),
-            ProductImage.is_primary.is_(True),
+    item_response = (
+        await build_order_items_response(
+            db,
+            order_items,
         )
     )
-
-    primary_images = image_result.scalars().all()
-
-    images_by_product_id = {
-        image.product_id: image.image_url
-        for image in primary_images
-    }
 
     # -----------------------------------------------------
     # RETURN ORDER
@@ -407,24 +813,7 @@ async def create_order(
         shipping_address=order.shipping_address,
         created_at=order.created_at,
         updated_at=order.updated_at,
-        items=[
-            {
-                "id": item.id,
-                "order_id": item.order_id,
-                "product_id": item.product_id,
-                "seller_id": item.seller_id,
-                "product_name": products_by_id[
-                    item.product_id
-                ].name,
-                "product_image": images_by_product_id.get(
-                    item.product_id
-                ),
-                "quantity": item.quantity,
-                "price": item.price,
-                "total": item.total,
-            }
-            for item in order_items
-        ],
+        items=item_response,
     )
 
 
@@ -451,7 +840,9 @@ async def get_my_orders(
         .where(
             Order.user_id == current_user.id
         )
-        .order_by(Order.created_at.desc())
+        .order_by(
+            Order.created_at.desc()
+        )
     )
 
     orders = result.scalars().all()
@@ -467,37 +858,12 @@ async def get_my_orders(
 
         items = items_result.scalars().all()
 
-        product_ids = [
-            item.product_id
-            for item in items
-        ]
-
-        products_result = await db.execute(
-            select(Product).where(
-                Product.id.in_(product_ids)
+        item_response = (
+            await build_order_items_response(
+                db,
+                items,
             )
         )
-
-        products = products_result.scalars().all()
-
-        products_by_id = {
-            product.id: product
-            for product in products
-        }
-
-        image_result = await db.execute(
-            select(ProductImage).where(
-                ProductImage.product_id.in_(product_ids),
-                ProductImage.is_primary.is_(True),
-            )
-        )
-
-        primary_images = image_result.scalars().all()
-
-        images_by_product_id = {
-            image.product_id: image.image_url
-            for image in primary_images
-        }
 
         response.append(
             OrderResponse(
@@ -508,27 +874,12 @@ async def get_my_orders(
                 coupon_code=order.coupon_code,
                 status=order.status,
                 payment_status=order.payment_status,
-                shipping_address=order.shipping_address,
+                shipping_address=(
+                    order.shipping_address
+                ),
                 created_at=order.created_at,
                 updated_at=order.updated_at,
-                items=[
-                    {
-                        "id": item.id,
-                        "order_id": item.order_id,
-                        "product_id": item.product_id,
-                        "seller_id": item.seller_id,
-                        "product_name": products_by_id[
-                            item.product_id
-                        ].name,
-                        "product_image": images_by_product_id.get(
-                            item.product_id
-                        ),
-                        "quantity": item.quantity,
-                        "price": item.price,
-                        "total": item.total,
-                    }
-                    for item in items
-                ],
+                items=item_response,
             )
         )
 
@@ -556,14 +907,17 @@ async def get_seller_analytics(
             OrderItem.order_id == Order.id,
         )
         .where(
-            OrderItem.seller_id == current_seller.id
+            OrderItem.seller_id
+            == current_seller.id
         )
         .distinct()
     )
 
     seller_orders = orders_result.all()
 
-    total_orders = len(seller_orders)
+    total_orders = len(
+        seller_orders
+    )
 
     status_counts = {
         "pending": 0,
@@ -575,24 +929,33 @@ async def get_seller_analytics(
 
     for order in seller_orders:
         if order.status in status_counts:
-            status_counts[order.status] += 1
+            status_counts[
+                order.status
+            ] += 1
 
     totals_result = await db.execute(
         select(
             func.coalesce(
-                func.sum(OrderItem.quantity),
+                func.sum(
+                    OrderItem.quantity
+                ),
                 0,
             ),
             func.coalesce(
-                func.sum(OrderItem.total),
+                func.sum(
+                    OrderItem.total
+                ),
                 0,
             ),
         ).where(
-            OrderItem.seller_id == current_seller.id
+            OrderItem.seller_id
+            == current_seller.id
         )
     )
 
-    total_units, total_sales = totals_result.one()
+    total_units, total_sales = (
+        totals_result.one()
+    )
 
     top_products_result = await db.execute(
         select(
@@ -607,10 +970,12 @@ async def get_seller_analytics(
         )
         .join(
             Product,
-            Product.id == OrderItem.product_id,
+            Product.id
+            == OrderItem.product_id,
         )
         .where(
-            OrderItem.seller_id == current_seller.id
+            OrderItem.seller_id
+            == current_seller.id
         )
         .group_by(
             OrderItem.product_id,
@@ -624,12 +989,18 @@ async def get_seller_analytics(
         .limit(5)
     )
 
-    top_products = top_products_result.all()
+    top_products = (
+        top_products_result.all()
+    )
 
     return {
         "total_orders": total_orders,
-        "total_units": int(total_units or 0),
-        "total_sales": float(total_sales or 0),
+        "total_units": int(
+            total_units or 0
+        ),
+        "total_sales": float(
+            total_sales or 0
+        ),
         "orders_by_status": status_counts,
         "top_products": [
             {
@@ -672,37 +1043,55 @@ async def get_seller_revenue(
                 func.distinct(Order.id)
             ).label("orders"),
             func.coalesce(
-                func.sum(OrderItem.quantity),
+                func.sum(
+                    OrderItem.quantity
+                ),
                 0,
             ).label("units"),
             func.coalesce(
-                func.sum(OrderItem.total),
+                func.sum(
+                    OrderItem.total
+                ),
                 0,
             ).label("sales"),
         )
         .join(
             OrderItem,
-            OrderItem.order_id == Order.id,
+            OrderItem.order_id
+            == Order.id,
         )
         .where(
-            OrderItem.seller_id == current_seller.id
+            OrderItem.seller_id
+            == current_seller.id
         )
         .group_by(
-            func.date(Order.created_at)
+            func.date(
+                Order.created_at
+            )
         )
         .order_by(
-            func.date(Order.created_at)
+            func.date(
+                Order.created_at
+            )
         )
     )
 
-    revenue_rows = revenue_result.all()
+    revenue_rows = (
+        revenue_result.all()
+    )
 
     return [
         {
             "date": str(date),
-            "orders": int(orders or 0),
-            "units": int(units or 0),
-            "sales": float(sales or 0),
+            "orders": int(
+                orders or 0
+            ),
+            "units": int(
+                units or 0
+            ),
+            "sales": float(
+                sales or 0
+            ),
         }
         for (
             date,
@@ -728,12 +1117,15 @@ async def get_seller_orders(
     seller_items_result = await db.execute(
         select(OrderItem.order_id)
         .where(
-            OrderItem.seller_id == current_seller.id
+            OrderItem.seller_id
+            == current_seller.id
         )
         .distinct()
     )
 
-    order_ids = seller_items_result.scalars().all()
+    order_ids = (
+        seller_items_result.scalars().all()
+    )
 
     if not order_ids:
         return []
@@ -743,7 +1135,9 @@ async def get_seller_orders(
         .where(
             Order.id.in_(order_ids)
         )
-        .order_by(Order.created_at.desc())
+        .order_by(
+            Order.created_at.desc()
+        )
     )
 
     orders = orders_result.scalars().all()
@@ -754,43 +1148,19 @@ async def get_seller_orders(
         items_result = await db.execute(
             select(OrderItem).where(
                 OrderItem.order_id == order.id,
-                OrderItem.seller_id == current_seller.id,
+                OrderItem.seller_id
+                == current_seller.id,
             )
         )
 
         items = items_result.scalars().all()
 
-        product_ids = [
-            item.product_id
-            for item in items
-        ]
-
-        products_result = await db.execute(
-            select(Product).where(
-                Product.id.in_(product_ids)
+        item_response = (
+            await build_order_items_response(
+                db,
+                items,
             )
         )
-
-        products = products_result.scalars().all()
-
-        products_by_id = {
-            product.id: product
-            for product in products
-        }
-
-        image_result = await db.execute(
-            select(ProductImage).where(
-                ProductImage.product_id.in_(product_ids),
-                ProductImage.is_primary.is_(True),
-            )
-        )
-
-        primary_images = image_result.scalars().all()
-
-        images_by_product_id = {
-            image.product_id: image.image_url
-            for image in primary_images
-        }
 
         response.append(
             OrderResponse(
@@ -800,28 +1170,15 @@ async def get_seller_orders(
                 discount_amount=order.discount_amount,
                 coupon_code=order.coupon_code,
                 status=order.status,
-                payment_status=order.payment_status,
-                shipping_address=order.shipping_address,
+                payment_status=(
+                    order.payment_status
+                ),
+                shipping_address=(
+                    order.shipping_address
+                ),
                 created_at=order.created_at,
                 updated_at=order.updated_at,
-                items=[
-                    {
-                        "id": item.id,
-                        "order_id": item.order_id,
-                        "product_id": item.product_id,
-                        "seller_id": item.seller_id,
-                        "product_name": products_by_id[
-                            item.product_id
-                        ].name,
-                        "product_image": images_by_product_id.get(
-                            item.product_id
-                        ),
-                        "quantity": item.quantity,
-                        "price": item.price,
-                        "total": item.total,
-                    }
-                    for item in items
-                ],
+                items=item_response,
             )
         )
 
@@ -876,16 +1233,22 @@ async def update_seller_order_status(
     seller_item_result = await db.execute(
         select(OrderItem).where(
             OrderItem.order_id == order.id,
-            OrderItem.seller_id == current_seller.id,
+            OrderItem.seller_id
+            == current_seller.id,
         )
     )
 
-    seller_item = seller_item_result.scalar_one_or_none()
+    seller_item = (
+        seller_item_result.scalar_one_or_none()
+    )
 
     if not seller_item:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only update orders containing your products.",
+            detail=(
+                "You can only update orders "
+                "containing your products."
+            ),
         )
 
     order.status = new_status
@@ -897,43 +1260,19 @@ async def update_seller_order_status(
     items_result = await db.execute(
         select(OrderItem).where(
             OrderItem.order_id == order.id,
-            OrderItem.seller_id == current_seller.id,
+            OrderItem.seller_id
+            == current_seller.id,
         )
     )
 
     items = items_result.scalars().all()
 
-    product_ids = [
-        item.product_id
-        for item in items
-    ]
-
-    products_result = await db.execute(
-        select(Product).where(
-            Product.id.in_(product_ids)
+    item_response = (
+        await build_order_items_response(
+            db,
+            items,
         )
     )
-
-    products = products_result.scalars().all()
-
-    products_by_id = {
-        product.id: product
-        for product in products
-    }
-
-    image_result = await db.execute(
-        select(ProductImage).where(
-            ProductImage.product_id.in_(product_ids),
-            ProductImage.is_primary.is_(True),
-        )
-    )
-
-    primary_images = image_result.scalars().all()
-
-    images_by_product_id = {
-        image.product_id: image.image_url
-        for image in primary_images
-    }
 
     return OrderResponse(
         id=order.id,
@@ -943,27 +1282,12 @@ async def update_seller_order_status(
         coupon_code=order.coupon_code,
         status=order.status,
         payment_status=order.payment_status,
-        shipping_address=order.shipping_address,
+        shipping_address=(
+            order.shipping_address
+        ),
         created_at=order.created_at,
         updated_at=order.updated_at,
-        items=[
-            {
-                "id": item.id,
-                "order_id": item.order_id,
-                "product_id": item.product_id,
-                "seller_id": item.seller_id,
-                "product_name": products_by_id[
-                    item.product_id
-                ].name,
-                "product_image": images_by_product_id.get(
-                    item.product_id
-                ),
-                "quantity": item.quantity,
-                "price": item.price,
-                "total": item.total,
-            }
-            for item in items
-        ],
+        items=item_response,
     )
 
 
@@ -979,19 +1303,11 @@ async def cancel_order(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # -----------------------------------------------------
-    # CUSTOMER ONLY
-    # -----------------------------------------------------
-
     if current_user.role != "customer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only customers can cancel orders.",
         )
-
-    # -----------------------------------------------------
-    # GET ORDER
-    # -----------------------------------------------------
 
     result = await db.execute(
         select(Order)
@@ -1009,10 +1325,6 @@ async def cancel_order(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Order not found.",
         )
-
-    # -----------------------------------------------------
-    # CHECK ORDER STATUS
-    # -----------------------------------------------------
 
     if order.status not in {
         "pending",
@@ -1036,11 +1348,9 @@ async def cancel_order(
         )
     )
 
-    shipments = shipments_result.scalars().all()
-
-    # -----------------------------------------------------
-    # DO NOT CANCEL AFTER SHIPPING
-    # -----------------------------------------------------
+    shipments = (
+        shipments_result.scalars().all()
+    )
 
     for shipment in shipments:
         if shipment.status in {
@@ -1066,7 +1376,9 @@ async def cancel_order(
         )
     )
 
-    order_items = items_result.scalars().all()
+    order_items = (
+        items_result.scalars().all()
+    )
 
     # -----------------------------------------------------
     # GET PAYMENT
@@ -1083,17 +1395,19 @@ async def cancel_order(
         )
     )
 
-    payment = payment_result.scalars().first()
+    payment = (
+        payment_result.scalars().first()
+    )
 
     # -----------------------------------------------------
     # HANDLE STRIPE PAYMENT
     # -----------------------------------------------------
 
-    if payment and payment.payment_method == "stripe":
-
-        # -------------------------------------------------
-        # PAID STRIPE PAYMENT → REFUND
-        # -------------------------------------------------
+    if (
+        payment
+        and payment.payment_method
+        == "stripe"
+    ):
 
         if payment.status == "paid":
 
@@ -1131,10 +1445,6 @@ async def cancel_order(
 
             order.payment_status = "refunded"
 
-        # -------------------------------------------------
-        # PENDING STRIPE PAYMENT → CANCEL PAYMENT INTENT
-        # -------------------------------------------------
-
         elif payment.status == "pending":
 
             if payment.stripe_payment_intent_id:
@@ -1170,22 +1480,24 @@ async def cancel_order(
 
             order.payment_status = "cancelled"
 
-        # -------------------------------------------------
-        # OTHER STRIPE PAYMENT STATUS
-        # -------------------------------------------------
-
         elif payment.status in {
             "failed",
             "cancelled",
             "refunded",
         }:
-            order.payment_status = payment.status
+            order.payment_status = (
+                payment.status
+            )
 
     # -----------------------------------------------------
     # HANDLE COD PAYMENT
     # -----------------------------------------------------
 
-    elif payment and payment.payment_method == "cod":
+    elif (
+        payment
+        and payment.payment_method
+        == "cod"
+    ):
 
         payment.status = "cancelled"
 
@@ -1205,18 +1517,45 @@ async def cancel_order(
 
     for order_item in order_items:
 
-        product_result = await db.execute(
-            select(Product)
-            .where(
-                Product.id == order_item.product_id
+        if order_item.variant_id is not None:
+
+            variant_result = await db.execute(
+                select(ProductVariant)
+                .where(
+                    ProductVariant.id
+                    == order_item.variant_id
+                )
+                .with_for_update()
             )
-            .with_for_update()
-        )
 
-        product = product_result.scalar_one_or_none()
+            variant = (
+                variant_result.scalar_one_or_none()
+            )
 
-        if product:
-            product.stock += order_item.quantity
+            if variant:
+                variant.stock += (
+                    order_item.quantity
+                )
+
+        else:
+
+            product_result = await db.execute(
+                select(Product)
+                .where(
+                    Product.id
+                    == order_item.product_id
+                )
+                .with_for_update()
+            )
+
+            product = (
+                product_result.scalar_one_or_none()
+            )
+
+            if product:
+                product.stock += (
+                    order_item.quantity
+                )
 
     # -----------------------------------------------------
     # RESTORE COUPON USAGE
@@ -1240,12 +1579,15 @@ async def cancel_order(
         coupon_result = await db.execute(
             select(Coupon)
             .where(
-                Coupon.code == order.coupon_code
+                Coupon.code
+                == order.coupon_code
             )
             .with_for_update()
         )
 
-        coupon = coupon_result.scalar_one_or_none()
+        coupon = (
+            coupon_result.scalar_one_or_none()
+        )
 
         if coupon and coupon.used_count > 0:
             coupon.used_count -= 1
@@ -1306,12 +1648,18 @@ async def get_order(
             detail="Order not found.",
         )
 
+    # -----------------------------------------------------
+    # CHECK ACCESS
+    # -----------------------------------------------------
+
     if current_user.role == "customer":
 
         if order.user_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You can only view your own orders.",
+                detail=(
+                    "You can only view your own orders."
+                ),
             )
 
     elif current_user.role == "seller":
@@ -1319,7 +1667,8 @@ async def get_order(
         seller_item_result = await db.execute(
             select(OrderItem).where(
                 OrderItem.order_id == order.id,
-                OrderItem.seller_id == current_user.id,
+                OrderItem.seller_id
+                == current_user.id,
             )
         )
 
@@ -1340,7 +1689,9 @@ async def get_order(
 
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not allowed to view this order.",
+            detail=(
+                "You are not allowed to view this order."
+            ),
         )
 
     # -----------------------------------------------------
@@ -1354,7 +1705,8 @@ async def get_order(
     if current_user.role == "seller":
 
         items_query = items_query.where(
-            OrderItem.seller_id == current_user.id
+            OrderItem.seller_id
+            == current_user.id
         )
 
     items_result = await db.execute(
@@ -1363,45 +1715,12 @@ async def get_order(
 
     items = items_result.scalars().all()
 
-    # -----------------------------------------------------
-    # GET PRODUCTS
-    # -----------------------------------------------------
-
-    product_ids = [
-        item.product_id
-        for item in items
-    ]
-
-    products_result = await db.execute(
-        select(Product).where(
-            Product.id.in_(product_ids)
+    item_response = (
+        await build_order_items_response(
+            db,
+            items,
         )
     )
-
-    products = products_result.scalars().all()
-
-    products_by_id = {
-        product.id: product
-        for product in products
-    }
-
-    # -----------------------------------------------------
-    # GET PRIMARY IMAGES
-    # -----------------------------------------------------
-
-    image_result = await db.execute(
-        select(ProductImage).where(
-            ProductImage.product_id.in_(product_ids),
-            ProductImage.is_primary.is_(True),
-        )
-    )
-
-    primary_images = image_result.scalars().all()
-
-    images_by_product_id = {
-        image.product_id: image.image_url
-        for image in primary_images
-    }
 
     # -----------------------------------------------------
     # RETURN ORDER
@@ -1415,25 +1734,10 @@ async def get_order(
         coupon_code=order.coupon_code,
         status=order.status,
         payment_status=order.payment_status,
-        shipping_address=order.shipping_address,
+        shipping_address=(
+            order.shipping_address
+        ),
         created_at=order.created_at,
         updated_at=order.updated_at,
-        items=[
-            {
-                "id": item.id,
-                "order_id": item.order_id,
-                "product_id": item.product_id,
-                "seller_id": item.seller_id,
-                "product_name": products_by_id[
-                    item.product_id
-                ].name,
-                "product_image": images_by_product_id.get(
-                    item.product_id
-                ),
-                "quantity": item.quantity,
-                "price": item.price,
-                "total": item.total,
-            }
-            for item in items
-        ],
+        items=item_response,
     )

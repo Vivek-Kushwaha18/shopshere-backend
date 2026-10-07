@@ -12,6 +12,8 @@ class CategoryCreate(BaseModel):
 
     description: str | None = None
 
+    parent_id: int | None = None
+
 
 class CategoryUpdate(BaseModel):
     name: str | None = Field(
@@ -22,13 +24,19 @@ class CategoryUpdate(BaseModel):
 
     description: str | None = None
 
+    parent_id: int | None = None
+
 
 class CategoryResponse(BaseModel):
     id: int
     name: str
     slug: str
     description: str | None
+
+    parent_id: int | None
+
     is_active: bool
+
     created_at: datetime
     updated_at: datetime
 

@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 class OrderItemCreate(BaseModel):
     product_id: int
 
+    variant_id: int | None = None
+
     quantity: int = Field(
         ...,
         gt=0,
@@ -37,6 +39,15 @@ class OrderCreate(BaseModel):
 
 
 # =========================================================
+# ORDER VARIANT OPTION
+# =========================================================
+
+class OrderVariantOptionResponse(BaseModel):
+    group_name: str
+    value: str
+
+
+# =========================================================
 # ORDER ITEM RESPONSE
 # =========================================================
 
@@ -44,10 +55,19 @@ class OrderItemResponse(BaseModel):
     id: int
     order_id: int
     product_id: int
+    variant_id: int | None = None
     seller_id: int
 
     product_name: str
     product_image: str | None = None
+
+    variant_sku: str | None = None
+
+    variant_options: list[
+        OrderVariantOptionResponse
+    ] = Field(
+        default_factory=list,
+    )
 
     quantity: int
     price: float

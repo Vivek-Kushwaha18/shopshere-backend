@@ -43,7 +43,11 @@ from app.models.payment import Payment
 from app.models.wishlist import Wishlist 
 from app.models.coupon import Coupon
 from app.models.review import Review  
-from app.models.shipment import Shipment      
+from app.models.shipment import Shipment
+from app.models.product_option_group import ProductOptionGroup
+from app.models.product_option_value import ProductOptionValue
+from app.models.product_variant import ProductVariant
+from app.models.product_variant_value import ProductVariantValue      
 # Add your models' metadata here
 target_metadata = Base.metadata
 

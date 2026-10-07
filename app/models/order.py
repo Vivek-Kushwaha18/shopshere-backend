@@ -90,12 +90,12 @@ class Order(Base):
         back_populates="order",
         cascade="all, delete-orphan",
     )
+
     shipments = relationship(
         "Shipment",
         back_populates="order",
         cascade="all, delete-orphan",
     )
-
 
 
 class OrderItem(Base):
@@ -116,6 +116,15 @@ class OrderItem(Base):
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id"),
         nullable=False,
+        index=True,
+    )
+
+    variant_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "product_variants.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
         index=True,
     )
 
@@ -147,6 +156,10 @@ class OrderItem(Base):
 
     product = relationship(
         "Product",
+    )
+
+    variant = relationship(
+        "ProductVariant",
     )
 
     seller = relationship(

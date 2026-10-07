@@ -33,10 +33,7 @@ async def generate_category_slug(
     if not base_slug:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Category name cannot generate "
-                "a valid slug"
-            ),
+            detail="Category name cannot generate a valid slug",
         )
 
     slug = base_slug
@@ -49,27 +46,75 @@ async def generate_category_slug(
             )
         )
 
-        existing_category = (
-            result.scalar_one_or_none()
-        )
+        existing_category = result.scalar_one_or_none()
 
         if existing_category is None:
             return slug
 
         slug = f"{base_slug}-{counter}"
-
-        # IMPORTANT:
-        # Move to the next slug number.
         counter += 1
 
 
 # =========================================================
+# VALIDATE PARENT CATEGORY
+# =========================================================
+
+async def validate_parent_category(
+    db: AsyncSession,
+    parent_id: int | None,
+    category_id: int | None = None,
+) -> None:
+    if parent_id is None:
+        return
+
+    if category_id is not None and parent_id == category_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A category cannot be its own parent",
+        )
+
+    result = await db.execute(
+        select(Category).where(
+            Category.id == parent_id
+        )
+    )
+
+    parent = result.scalar_one_or_none()
+
+    if parent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Parent category not found",
+        )
+
+    if not parent.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot use an inactive category as parent",
+        )
+
+    # Prevent circular category structure
+    if category_id is not None:
+        current_parent_id = parent.parent_id
+
+        while current_parent_id is not None:
+            if current_parent_id == category_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot create a circular category structure",
+                )
+
+            result = await db.execute(
+                select(Category.parent_id).where(
+                    Category.id == current_parent_id
+                )
+            )
+
+            current_parent_id = result.scalar_one_or_none()
+
+
+# =========================================================
 # GET ALL ACTIVE CATEGORIES
-#
-# Public
-# Customer
-# Seller
-# Admin
 # =========================================================
 
 @router.get(
@@ -92,11 +137,6 @@ async def get_categories(
 
 # =========================================================
 # GET ONE ACTIVE CATEGORY BY SLUG
-#
-# Public
-# Customer
-# Seller
-# Admin
 # =========================================================
 
 @router.get(
@@ -114,9 +154,7 @@ async def get_category_by_slug(
         )
     )
 
-    category = (
-        result.scalar_one_or_none()
-    )
+    category = result.scalar_one_or_none()
 
     if category is None:
         raise HTTPException(
@@ -129,11 +167,6 @@ async def get_category_by_slug(
 
 # =========================================================
 # GET ONE ACTIVE CATEGORY BY ID
-#
-# Public
-# Customer
-# Seller
-# Admin
 # =========================================================
 
 @router.get(
@@ -151,9 +184,7 @@ async def get_category(
         )
     )
 
-    category = (
-        result.scalar_one_or_none()
-    )
+    category = result.scalar_one_or_none()
 
     if category is None:
         raise HTTPException(
@@ -166,8 +197,6 @@ async def get_category(
 
 # =========================================================
 # CREATE CATEGORY
-#
-# ADMIN ONLY
 # =========================================================
 
 @router.post(
@@ -178,50 +207,30 @@ async def get_category(
 async def create_category(
     category_data: CategoryCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
-    # -----------------------------------------------------
-    # ADMIN CHECK
-    # -----------------------------------------------------
-
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Only admin can create "
-                "categories"
-            ),
+            detail="Only admin can create categories",
         )
-
-    # -----------------------------------------------------
-    # CLEAN DATA
-    # -----------------------------------------------------
 
     name = category_data.name.strip()
 
     if not name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Category name cannot be empty"
-            ),
+            detail="Category name cannot be empty",
         )
 
-    # -----------------------------------------------------
-    # CHECK DUPLICATE NAME
-    # -----------------------------------------------------
-
+    # Check duplicate name
     result = await db.execute(
         select(Category).where(
             Category.name.ilike(name)
         )
     )
 
-    existing_category = (
-        result.scalar_one_or_none()
-    )
+    existing_category = result.scalar_one_or_none()
 
     if existing_category is not None:
         raise HTTPException(
@@ -229,18 +238,17 @@ async def create_category(
             detail="Category already exists",
         )
 
-    # -----------------------------------------------------
-    # GENERATE SLUG
-    # -----------------------------------------------------
+    # Validate parent
+    await validate_parent_category(
+        db=db,
+        parent_id=category_data.parent_id,
+    )
 
+    # Generate slug
     slug = await generate_category_slug(
         db,
         name,
     )
-
-    # -----------------------------------------------------
-    # CREATE
-    # -----------------------------------------------------
 
     category = Category(
         name=name,
@@ -250,6 +258,7 @@ async def create_category(
             if category_data.description
             else None
         ),
+        parent_id=category_data.parent_id,
         is_active=True,
     )
 
@@ -263,11 +272,6 @@ async def create_category(
 
 # =========================================================
 # UPDATE CATEGORY
-#
-# ADMIN ONLY
-#
-# IMPORTANT:
-# Slug is NOT changed when category name changes.
 # =========================================================
 
 @router.put(
@@ -278,26 +282,13 @@ async def update_category(
     category_id: int,
     category_data: CategoryUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
-    # -----------------------------------------------------
-    # ADMIN CHECK
-    # -----------------------------------------------------
-
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Only admin can update "
-                "categories"
-            ),
+            detail="Only admin can update categories",
         )
-
-    # -----------------------------------------------------
-    # FIND CATEGORY
-    # -----------------------------------------------------
 
     result = await db.execute(
         select(Category).where(
@@ -305,9 +296,7 @@ async def update_category(
         )
     )
 
-    category = (
-        result.scalar_one_or_none()
-    )
+    category = result.scalar_one_or_none()
 
     if category is None:
         raise HTTPException(
@@ -315,23 +304,14 @@ async def update_category(
             detail="Category not found",
         )
 
-    # -----------------------------------------------------
-    # UPDATE NAME
-    # -----------------------------------------------------
-
+    # Update name
     if category_data.name is not None:
-
         name = category_data.name.strip()
 
         if not name:
             raise HTTPException(
-                status_code=(
-                    status.HTTP_400_BAD_REQUEST
-                ),
-                detail=(
-                    "Category name "
-                    "cannot be empty"
-                ),
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Category name cannot be empty",
             )
 
         duplicate_result = await db.execute(
@@ -347,28 +327,28 @@ async def update_category(
 
         if duplicate_category is not None:
             raise HTTPException(
-                status_code=(
-                    status.HTTP_400_BAD_REQUEST
-                ),
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Category already exists",
             )
 
         category.name = name
 
-    # -----------------------------------------------------
-    # UPDATE DESCRIPTION
-    # -----------------------------------------------------
-
+    # Update description
     if category_data.description is not None:
-
         category.description = (
             category_data.description.strip()
             or None
         )
 
-    # -----------------------------------------------------
-    # SAVE
-    # -----------------------------------------------------
+    # Update parent
+    if "parent_id" in category_data.model_fields_set:
+        await validate_parent_category(
+            db=db,
+            parent_id=category_data.parent_id,
+            category_id=category_id,
+        )
+
+        category.parent_id = category_data.parent_id
 
     await db.commit()
     await db.refresh(category)
@@ -378,8 +358,6 @@ async def update_category(
 
 # =========================================================
 # ACTIVATE CATEGORY
-#
-# ADMIN ONLY
 # =========================================================
 
 @router.patch(
@@ -389,17 +367,12 @@ async def update_category(
 async def activate_category(
     category_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Only admin can activate "
-                "categories"
-            ),
+            detail="Only admin can activate categories",
         )
 
     result = await db.execute(
@@ -408,9 +381,7 @@ async def activate_category(
         )
     )
 
-    category = (
-        result.scalar_one_or_none()
-    )
+    category = result.scalar_one_or_none()
 
     if category is None:
         raise HTTPException(
@@ -428,8 +399,6 @@ async def activate_category(
 
 # =========================================================
 # DEACTIVATE CATEGORY
-#
-# ADMIN ONLY
 # =========================================================
 
 @router.patch(
@@ -439,17 +408,12 @@ async def activate_category(
 async def deactivate_category(
     category_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Only admin can deactivate "
-                "categories"
-            ),
+            detail="Only admin can deactivate categories",
         )
 
     result = await db.execute(
@@ -458,9 +422,7 @@ async def deactivate_category(
         )
     )
 
-    category = (
-        result.scalar_one_or_none()
-    )
+    category = result.scalar_one_or_none()
 
     if category is None:
         raise HTTPException(
@@ -478,8 +440,6 @@ async def deactivate_category(
 
 # =========================================================
 # DELETE CATEGORY
-#
-# ADMIN ONLY
 # =========================================================
 
 @router.delete(
@@ -488,17 +448,12 @@ async def deactivate_category(
 async def delete_category(
     category_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Only admin can delete "
-                "categories"
-            ),
+            detail="Only admin can delete categories",
         )
 
     result = await db.execute(
@@ -507,9 +462,7 @@ async def delete_category(
         )
     )
 
-    category = (
-        result.scalar_one_or_none()
-    )
+    category = result.scalar_one_or_none()
 
     if category is None:
         raise HTTPException(
@@ -517,13 +470,34 @@ async def delete_category(
             detail="Category not found",
         )
 
-    await db.delete(category)
+    # Check children
+    children_result = await db.execute(
+        select(Category.id)
+        .where(
+            Category.parent_id == category_id
+        )
+        .limit(1)
+    )
 
+    has_children = (
+        children_result.scalar_one_or_none()
+        is not None
+    )
+
+    if has_children:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Cannot delete this category because "
+                "it has child categories. "
+                "Delete or move the child categories first."
+            ),
+        )
+
+    await db.delete(category)
     await db.commit()
 
     return {
         "success": True,
-        "message": (
-            "Category deleted successfully"
-        ),
+        "message": "Category deleted successfully",
     }

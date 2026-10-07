@@ -9,3 +9,7 @@ from app.models.order import OrderItem
 from app.models.address import Address
 from app.models.payment import Payment
 from app.models.shipment import Shipment
+from app.models.product_option_group import ProductOptionGroup
+from app.models.product_option_value import ProductOptionValue
+from app.models.product_variant import ProductVariant
+from app.models.product_variant_value import ProductVariantValue

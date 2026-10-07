@@ -1,7 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+)
+from sqlalchemy.orm import (
+    Mapped,
+    mapped_column,
+    relationship,
+)
 
 from app.models.base import Base
 
@@ -20,17 +30,26 @@ class Category(Base):
         nullable=False,
         index=True,
     )
-    
+
     slug: Mapped[str | None] = mapped_column(
-    String(120),
-    unique=True,
-    nullable=True,
-    index=True,
+        String(120),
+        unique=True,
+        nullable=True,
+        index=True,
     )
 
     description: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
+    )
+
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "categories.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
     )
 
     is_active: Mapped[bool] = mapped_column(
@@ -50,4 +69,16 @@ class Category(Base):
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
         nullable=False,
+    )
+
+    parent: Mapped["Category | None"] = relationship(
+        "Category",
+        remote_side="Category.id",
+        back_populates="children",
+    )
+
+    children: Mapped[list["Category"]] = relationship(
+        "Category",
+        back_populates="parent",
+        cascade="all",
     )
