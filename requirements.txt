@@ -12,3 +12,4 @@ python-jose[cryptography]
 boto3
 greenlet
 stripe
+openai>=1.0.0

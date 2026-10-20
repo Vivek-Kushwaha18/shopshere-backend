@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +18,13 @@ from app.api.review import router as review_router
 from app.api.shipment import router as shipment_router
 from app.api.product_variants import router as product_variants_router
 from app.api.product_options import router as product_options_router
-from app.api.product_variant_images import router as product_variant_images_router
+from app.api.product_variant_images import (
+    router as product_variant_images_router,
+)
+from app.api.chat import (
+    router as chat_router,
+    admin_router as admin_ai_conversations_router,
+)
 
 app = FastAPI(
     title="ShopSphere API",
@@ -32,7 +39,7 @@ app = FastAPI(
 
 app.mount(
     "/uploads",
-    StaticFiles(directory="uploads"),
+    StaticFiles(directory="uploads", check_dir=False),
     name="uploads",
 )
 
@@ -74,6 +81,14 @@ app.include_router(shipment_router)
 app.include_router(product_variants_router)
 app.include_router(product_options_router)
 app.include_router(product_variant_images_router)
+
+# Customer AI chat and conversation history
+app.include_router(chat_router)
+
+# Admin access to all customer AI conversations
+app.include_router(admin_ai_conversations_router)
+
+
 # ============================================================
 # ROOT
 # ============================================================
@@ -84,6 +99,10 @@ async def root():
         "message": "ShopSphere API is running"
     }
 
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
 
 @app.get("/health")
 async def health():
