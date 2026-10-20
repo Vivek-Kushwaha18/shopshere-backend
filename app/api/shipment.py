@@ -1,3 +1,4 @@
+
 from datetime import datetime
 
 from fastapi import (
@@ -15,6 +16,7 @@ from app.core.dependencies import (
 )
 from app.database.database import get_db
 from app.models.order import Order
+from app.models.payment import Payment
 from app.models.shipment import Shipment
 from app.models.user import User
 
@@ -29,21 +31,15 @@ router = APIRouter(
 # SELLER - GET MY SHIPMENTS
 # =========================================================
 
-@router.get(
-    "/seller/my-shipments",
-)
+@router.get("/seller/my-shipments")
 async def get_my_shipments(
     db: AsyncSession = Depends(get_db),
     current_seller: User = Depends(get_current_seller),
 ):
     result = await db.execute(
         select(Shipment)
-        .where(
-            Shipment.seller_id == current_seller.id
-        )
-        .order_by(
-            Shipment.created_at.desc()
-        )
+        .where(Shipment.seller_id == current_seller.id)
+        .order_by(Shipment.created_at.desc())
     )
 
     shipments = result.scalars().all()
@@ -55,13 +51,9 @@ async def get_my_shipments(
             "seller_id": shipment.seller_id,
             "tracking_number": shipment.tracking_number,
             "status": shipment.status,
-            "expected_delivery_date": (
-                shipment.expected_delivery_date
-            ),
+            "expected_delivery_date": shipment.expected_delivery_date,
             "shipped_at": shipment.shipped_at,
-            "out_for_delivery_at": (
-                shipment.out_for_delivery_at
-            ),
+            "out_for_delivery_at": shipment.out_for_delivery_at,
             "delivered_at": shipment.delivered_at,
             "created_at": shipment.created_at,
             "updated_at": shipment.updated_at,
@@ -74,9 +66,7 @@ async def get_my_shipments(
 # SELLER - GET SINGLE SHIPMENT
 # =========================================================
 
-@router.get(
-    "/seller/{shipment_id}",
-)
+@router.get("/seller/{shipment_id}")
 async def get_seller_shipment(
     shipment_id: int,
     db: AsyncSession = Depends(get_db),
@@ -91,7 +81,7 @@ async def get_seller_shipment(
 
     shipment = result.scalar_one_or_none()
 
-    if not shipment:
+    if shipment is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Shipment not found.",
@@ -103,13 +93,9 @@ async def get_seller_shipment(
         "seller_id": shipment.seller_id,
         "tracking_number": shipment.tracking_number,
         "status": shipment.status,
-        "expected_delivery_date": (
-            shipment.expected_delivery_date
-        ),
+        "expected_delivery_date": shipment.expected_delivery_date,
         "shipped_at": shipment.shipped_at,
-        "out_for_delivery_at": (
-            shipment.out_for_delivery_at
-        ),
+        "out_for_delivery_at": shipment.out_for_delivery_at,
         "delivered_at": shipment.delivered_at,
         "created_at": shipment.created_at,
         "updated_at": shipment.updated_at,
@@ -120,9 +106,7 @@ async def get_seller_shipment(
 # SELLER - UPDATE SHIPMENT STATUS
 # =========================================================
 
-@router.patch(
-    "/seller/{shipment_id}/status",
-)
+@router.patch("/seller/{shipment_id}/status")
 async def update_shipment_status(
     shipment_id: int,
     new_status: str,
@@ -155,7 +139,7 @@ async def update_shipment_status(
 
     shipment = result.scalar_one_or_none()
 
-    if not shipment:
+    if shipment is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Shipment not found.",
@@ -190,14 +174,10 @@ async def update_shipment_status(
         )
 
     # -----------------------------------------------------
-    # UPDATE STATUS
+    # UPDATE SHIPMENT STATUS
     # -----------------------------------------------------
 
     shipment.status = new_status
-
-    # -----------------------------------------------------
-    # SET TIMESTAMPS
-    # -----------------------------------------------------
 
     now = datetime.utcnow()
 
@@ -222,8 +202,77 @@ async def update_shipment_status(
         if shipment.delivered_at is None:
             shipment.delivered_at = now
 
-    await db.commit()
+    # -----------------------------------------------------
+    # COD: MARK PAYMENT PAID AFTER ALL SHIPMENTS DELIVER
+    # -----------------------------------------------------
 
+    if new_status == "delivered":
+        # Flush the shipment update before checking all shipments.
+        await db.flush()
+
+        order_result = await db.execute(
+            select(Order).where(
+                Order.id == shipment.order_id
+            )
+        )
+
+        order = order_result.scalar_one_or_none()
+
+        if order is not None:
+            payment_result = await db.execute(
+                select(Payment).where(
+                    Payment.order_id == order.id
+                )
+            )
+
+            payments = payment_result.scalars().all()
+
+            cod_methods = {
+                "cod",
+                "cash_on_delivery",
+                "cash on delivery",
+            }
+
+            cod_payments = [
+                payment
+                for payment in payments
+                if payment.payment_method
+                and payment.payment_method.strip().lower()
+                in cod_methods
+            ]
+
+            # Only change payment status for COD orders.
+            # Stripe and other online payments are not changed.
+            if cod_payments:
+                shipment_result = await db.execute(
+                    select(Shipment.status).where(
+                        Shipment.order_id == order.id
+                    )
+                )
+
+                shipment_statuses = (
+                    shipment_result.scalars().all()
+                )
+
+                all_shipments_delivered = (
+                    bool(shipment_statuses)
+                    and all(
+                        shipment_status == "delivered"
+                        for shipment_status in shipment_statuses
+                    )
+                )
+
+                if all_shipments_delivered:
+                    order.payment_status = "paid"
+
+                    for payment in cod_payments:
+                        payment.status = "paid"
+
+    # -----------------------------------------------------
+    # SAVE CHANGES
+    # -----------------------------------------------------
+
+    await db.commit()
     await db.refresh(shipment)
 
     return {
@@ -234,13 +283,9 @@ async def update_shipment_status(
             "seller_id": shipment.seller_id,
             "tracking_number": shipment.tracking_number,
             "status": shipment.status,
-            "expected_delivery_date": (
-                shipment.expected_delivery_date
-            ),
+            "expected_delivery_date": shipment.expected_delivery_date,
             "shipped_at": shipment.shipped_at,
-            "out_for_delivery_at": (
-                shipment.out_for_delivery_at
-            ),
+            "out_for_delivery_at": shipment.out_for_delivery_at,
             "delivered_at": shipment.delivered_at,
             "created_at": shipment.created_at,
             "updated_at": shipment.updated_at,
@@ -252,9 +297,7 @@ async def update_shipment_status(
 # SELLER - UPDATE TRACKING NUMBER
 # =========================================================
 
-@router.patch(
-    "/seller/{shipment_id}/tracking-number",
-)
+@router.patch("/seller/{shipment_id}/tracking-number")
 async def update_tracking_number(
     shipment_id: int,
     tracking_number: str,
@@ -278,7 +321,7 @@ async def update_tracking_number(
 
     shipment = result.scalar_one_or_none()
 
-    if not shipment:
+    if shipment is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Shipment not found.",
@@ -291,9 +334,7 @@ async def update_tracking_number(
         )
     )
 
-    existing_shipment = (
-        existing_result.scalar_one_or_none()
-    )
+    existing_shipment = existing_result.scalar_one_or_none()
 
     if existing_shipment:
         raise HTTPException(
@@ -304,7 +345,6 @@ async def update_tracking_number(
     shipment.tracking_number = tracking_number
 
     await db.commit()
-
     await db.refresh(shipment)
 
     return {
@@ -315,13 +355,9 @@ async def update_tracking_number(
             "seller_id": shipment.seller_id,
             "tracking_number": shipment.tracking_number,
             "status": shipment.status,
-            "expected_delivery_date": (
-                shipment.expected_delivery_date
-            ),
+            "expected_delivery_date": shipment.expected_delivery_date,
             "shipped_at": shipment.shipped_at,
-            "out_for_delivery_at": (
-                shipment.out_for_delivery_at
-            ),
+            "out_for_delivery_at": shipment.out_for_delivery_at,
             "delivered_at": shipment.delivered_at,
             "created_at": shipment.created_at,
             "updated_at": shipment.updated_at,
@@ -333,9 +369,7 @@ async def update_tracking_number(
 # CUSTOMER - GET ORDER SHIPMENTS
 # =========================================================
 
-@router.get(
-    "/customer/order/{order_id}",
-)
+@router.get("/customer/order/{order_id}")
 async def get_customer_order_shipments(
     order_id: int,
     db: AsyncSession = Depends(get_db),
@@ -354,7 +388,7 @@ async def get_customer_order_shipments(
 
     order = order_result.scalar_one_or_none()
 
-    if not order:
+    if order is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Order not found.",
@@ -366,12 +400,8 @@ async def get_customer_order_shipments(
 
     shipment_result = await db.execute(
         select(Shipment)
-        .where(
-            Shipment.order_id == order_id
-        )
-        .order_by(
-            Shipment.created_at.asc()
-        )
+        .where(Shipment.order_id == order_id)
+        .order_by(Shipment.created_at.asc())
     )
 
     shipments = shipment_result.scalars().all()
@@ -391,13 +421,9 @@ async def get_customer_order_shipments(
                 "seller_id": shipment.seller_id,
                 "tracking_number": shipment.tracking_number,
                 "status": shipment.status,
-                "expected_delivery_date": (
-                    shipment.expected_delivery_date
-                ),
+                "expected_delivery_date": shipment.expected_delivery_date,
                 "shipped_at": shipment.shipped_at,
-                "out_for_delivery_at": (
-                    shipment.out_for_delivery_at
-                ),
+                "out_for_delivery_at": shipment.out_for_delivery_at,
                 "delivered_at": shipment.delivered_at,
                 "created_at": shipment.created_at,
                 "updated_at": shipment.updated_at,
