@@ -1,9 +1,9 @@
-import json
+
 from datetime import datetime
 
 import stripe
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,16 +23,10 @@ from app.models.product_variant import ProductVariant
 from app.models.product_variant_value import ProductVariantValue
 from app.models.shipment import Shipment
 from app.models.user import User
-from app.schemas.order import (
-    OrderCreate,
-    OrderResponse,
-)
+from app.schemas.order import OrderCreate, OrderResponse
 
 
-router = APIRouter(
-    prefix="/orders",
-    tags=["Orders"],
-)
+router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
 # =========================================================
@@ -46,41 +40,20 @@ async def build_order_items_response(
     if not items:
         return []
 
-    product_ids = list(
-        {
-            item.product_id
-            for item in items
-        }
-    )
-
-    variant_ids = list(
-        {
-            item.variant_id
-            for item in items
-            if item.variant_id is not None
-        }
-    )
-
-    # -----------------------------------------------------
-    # GET PRODUCTS
-    # -----------------------------------------------------
-
-    products_result = await db.execute(
-        select(Product).where(
-            Product.id.in_(product_ids)
-        )
-    )
-
-    products = products_result.scalars().all()
-
-    products_by_id = {
-        product.id: product
-        for product in products
+    product_ids = {item.product_id for item in items}
+    variant_ids = {
+        item.variant_id
+        for item in items
+        if item.variant_id is not None
     }
 
-    # -----------------------------------------------------
-    # GET VARIANTS
-    # -----------------------------------------------------
+    products_result = await db.execute(
+        select(Product).where(Product.id.in_(product_ids))
+    )
+    products_by_id = {
+        product.id: product
+        for product in products_result.scalars().all()
+    }
 
     variants_by_id: dict[int, ProductVariant] = {}
 
@@ -90,24 +63,13 @@ async def build_order_items_response(
                 ProductVariant.id.in_(variant_ids)
             )
         )
-
-        variants = variants_result.scalars().all()
-
         variants_by_id = {
             variant.id: variant
-            for variant in variants
+            for variant in variants_result.scalars().all()
         }
 
-    # -----------------------------------------------------
-    # GET VARIANT OPTIONS
-    # -----------------------------------------------------
-
-    variant_options_by_variant_id: dict[
-        int,
-        list[dict],
-    ] = {
-        variant_id: []
-        for variant_id in variant_ids
+    variant_options_by_variant_id: dict[int, list[dict]] = {
+        variant_id: [] for variant_id in variant_ids
     }
 
     if variant_ids:
@@ -128,9 +90,7 @@ async def build_order_items_response(
                 == ProductOptionValue.option_group_id,
             )
             .where(
-                ProductVariantValue.variant_id.in_(
-                    variant_ids
-                )
+                ProductVariantValue.variant_id.in_(variant_ids)
             )
             .order_by(
                 ProductOptionGroup.sort_order,
@@ -138,127 +98,70 @@ async def build_order_items_response(
             )
         )
 
-        option_rows = option_result.all()
-
-        for (
-            variant_id,
-            group_name,
-            value,
-        ) in option_rows:
-            variant_options_by_variant_id[
-                variant_id
-            ].append(
+        for variant_id, group_name, value in option_result.all():
+            variant_options_by_variant_id[variant_id].append(
                 {
                     "group_name": group_name,
                     "value": value,
                 }
             )
 
-    # -----------------------------------------------------
-    # GET VARIANT PRIMARY IMAGES
-    # -----------------------------------------------------
-
-    variant_images_by_variant_id: dict[
-        int,
-        str,
-    ] = {}
+    variant_images_by_variant_id: dict[int, str] = {}
 
     if variant_ids:
         variant_image_result = await db.execute(
             select(ProductImage)
             .where(
-                ProductImage.variant_id.in_(
-                    variant_ids
-                ),
+                ProductImage.variant_id.in_(variant_ids),
                 ProductImage.is_primary.is_(True),
             )
-            .order_by(
-                ProductImage.sort_order
-            )
+            .order_by(ProductImage.sort_order)
         )
 
-        variant_images = (
-            variant_image_result.scalars().all()
-        )
-
-        for image in variant_images:
-            if image.variant_id not in (
-                variant_images_by_variant_id
-            ):
-                variant_images_by_variant_id[
-                    image.variant_id
-                ] = image.image_url
-
-    # -----------------------------------------------------
-    # GET PRODUCT PRIMARY IMAGES
-    # -----------------------------------------------------
+        for image in variant_image_result.scalars().all():
+            if image.variant_id not in variant_images_by_variant_id:
+                variant_images_by_variant_id[image.variant_id] = (
+                    image.image_url
+                )
 
     product_images_result = await db.execute(
         select(ProductImage)
         .where(
-            ProductImage.product_id.in_(
-                product_ids
-            ),
+            ProductImage.product_id.in_(product_ids),
             ProductImage.variant_id.is_(None),
             ProductImage.is_primary.is_(True),
         )
-        .order_by(
-            ProductImage.sort_order
-        )
+        .order_by(ProductImage.sort_order)
     )
 
-    product_images = (
-        product_images_result.scalars().all()
-    )
+    images_by_product_id: dict[int, str] = {}
 
-    images_by_product_id: dict[
-        int,
-        str,
-    ] = {}
-
-    for image in product_images:
-        if image.product_id not in (
-            images_by_product_id
-        ):
-            images_by_product_id[
-                image.product_id
-            ] = image.image_url
-
-    # -----------------------------------------------------
-    # BUILD RESPONSE
-    # -----------------------------------------------------
+    for image in product_images_result.scalars().all():
+        if image.product_id not in images_by_product_id:
+            images_by_product_id[image.product_id] = image.image_url
 
     response = []
 
     for item in items:
-        product = products_by_id.get(
-            item.product_id
-        )
+        product = products_by_id.get(item.product_id)
 
         if not product:
             continue
 
-        variant = None
-
-        if item.variant_id is not None:
-            variant = variants_by_id.get(
-                item.variant_id
-            )
+        variant = (
+            variants_by_id.get(item.variant_id)
+            if item.variant_id is not None
+            else None
+        )
 
         product_image = (
-            variant_images_by_variant_id.get(
-                item.variant_id
-            )
+            variant_images_by_variant_id.get(item.variant_id)
             if item.variant_id is not None
             else None
         )
 
         if not product_image:
-            product_image = (
-                images_by_product_id.get(
-                    item.product_id
-                )
-            )
+            product_image = images_by_product_id.get(item.product_id)
 
         response.append(
             {
@@ -269,15 +172,10 @@ async def build_order_items_response(
                 "seller_id": item.seller_id,
                 "product_name": product.name,
                 "product_image": product_image,
-                "variant_sku": (
-                    variant.sku
-                    if variant
-                    else None
-                ),
+                "variant_sku": variant.sku if variant else None,
                 "variant_options": (
                     variant_options_by_variant_id.get(
-                        item.variant_id,
-                        [],
+                        item.variant_id, []
                     )
                     if item.variant_id is not None
                     else []
@@ -302,16 +200,9 @@ async def build_order_items_response(
 )
 async def create_order(
     order_data: OrderCreate,
-    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    payload = await request.json()
-
-    print("*** Request Payload ***")
-    print(json.dumps(payload, indent=2))
-    print("******")
-
     if current_user.role != "customer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -324,14 +215,20 @@ async def create_order(
             detail="Order must contain at least one item.",
         )
 
-    # -----------------------------------------------------
-    # GET PRODUCTS
-    # -----------------------------------------------------
+    # Stripe, Razorpay and COD are supported order methods.
+    if order_data.payment_method not in {"stripe", "razorpay", "cod"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid payment method.",
+        )
 
-    product_ids = [
-        item.product_id
-        for item in order_data.items
-    ]
+    product_ids = [item.product_id for item in order_data.items]
+
+    if any(item.quantity <= 0 for item in order_data.items):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Product quantities must be greater than zero.",
+        )
 
     result = await db.execute(
         select(Product)
@@ -340,26 +237,19 @@ async def create_order(
             Product.is_deleted.is_(False),
             Product.is_active.is_(True),
         )
+        .with_for_update()
     )
-
-    products = result.scalars().all()
 
     products_by_id = {
         product.id: product
-        for product in products
+        for product in result.scalars().all()
     }
 
-    if len(products_by_id) != len(
-        set(product_ids)
-    ):
+    if len(products_by_id) != len(set(product_ids)):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="One or more products were not found.",
         )
-
-    # -----------------------------------------------------
-    # GET ACTIVE VARIANTS
-    # -----------------------------------------------------
 
     variant_ids = [
         item.variant_id
@@ -379,82 +269,49 @@ async def create_order(
             .with_for_update()
         )
 
-        variants = variant_result.scalars().all()
-
         variants_by_id = {
             variant.id: variant
-            for variant in variants
+            for variant in variant_result.scalars().all()
         }
 
-        if len(variants_by_id) != len(
-            set(variant_ids)
-        ):
+        if len(variants_by_id) != len(set(variant_ids)):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=(
-                    "One or more selected product "
-                    "variants were not found."
-                ),
+                detail="One or more selected product variants were not found.",
             )
 
-    # -----------------------------------------------------
-    # VALIDATE VARIANTS AND CALCULATE SUBTOTAL
-    # -----------------------------------------------------
-
+    # Validate stock and calculate prices from the database.
     subtotal = 0.0
 
     for item_data in order_data.items:
-        product = products_by_id[
-            item_data.product_id
-        ]
+        product = products_by_id[item_data.product_id]
 
         active_variants_result = await db.execute(
-            select(ProductVariant.id)
-            .where(
-                ProductVariant.product_id
-                == product.id,
+            select(ProductVariant.id).where(
+                ProductVariant.product_id == product.id,
                 ProductVariant.is_active.is_(True),
             )
         )
-
-        active_variant_ids = (
-            active_variants_result.scalars().all()
-        )
-
-        # -------------------------------------------------
-        # PRODUCT HAS ACTIVE VARIANTS
-        # -------------------------------------------------
+        active_variant_ids = active_variants_result.scalars().all()
 
         if active_variant_ids:
-
             if item_data.variant_id is None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"Please select a variant for "
-                        f"product '{product.name}'."
+                        f"Please select a variant for product "
+                        f"'{product.name}'."
                     ),
                 )
 
-            variant = variants_by_id.get(
-                item_data.variant_id
-            )
+            variant = variants_by_id.get(item_data.variant_id)
 
-            if not variant:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=(
-                        "Selected product variant "
-                        "was not found."
-                    ),
-                )
-
-            if variant.product_id != product.id:
+            if not variant or variant.product_id != product.id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"The selected variant does not "
-                        f"belong to product '{product.name}'."
+                        f"The selected variant is invalid for "
+                        f"product '{product.name}'."
                     ),
                 )
 
@@ -462,28 +319,21 @@ async def create_order(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"Not enough stock for the selected "
-                        f"variant of '{product.name}'. "
-                        f"Available stock: {variant.stock}."
+                        f"Not enough stock for the selected variant "
+                        f"of '{product.name}'. Available stock: "
+                        f"{variant.stock}."
                     ),
                 )
 
-            item_price = float(
-                variant.price
-            )
-
-        # -------------------------------------------------
-        # PRODUCT WITHOUT VARIANTS
-        # -------------------------------------------------
+            item_price = float(variant.price)
 
         else:
-
             if item_data.variant_id is not None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"Product '{product.name}' does not "
-                        f"have selectable variants."
+                        f"Product '{product.name}' does not have "
+                        f"selectable variants."
                     ),
                 )
 
@@ -491,35 +341,22 @@ async def create_order(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"Not enough stock for product "
-                        f"'{product.name}'. Available stock: "
-                        f"{product.stock}."
+                        f"Not enough stock for product '{product.name}'. "
+                        f"Available stock: {product.stock}."
                     ),
                 )
 
-            item_price = float(
-                product.price
-            )
+            item_price = float(product.price)
 
-        item_total = (
-            item_price
-            * item_data.quantity
-        )
+        subtotal += item_price * item_data.quantity
 
-        subtotal += item_total
-
-    # -----------------------------------------------------
-    # COUPON
-    # -----------------------------------------------------
-
+    # Validate coupon.
     discount_amount = 0.0
     coupon_code = None
     coupon = None
 
     if order_data.coupon_code:
-        coupon_code = (
-            order_data.coupon_code.strip().upper()
-        )
+        coupon_code = order_data.coupon_code.strip().upper()
 
         if not coupon_code:
             raise HTTPException(
@@ -528,14 +365,11 @@ async def create_order(
             )
 
         coupon_result = await db.execute(
-            select(Coupon).where(
-                Coupon.code == coupon_code
-            )
+            select(Coupon)
+            .where(Coupon.code == coupon_code)
+            .with_for_update()
         )
-
-        coupon = (
-            coupon_result.scalar_one_or_none()
-        )
+        coupon = coupon_result.scalar_one_or_none()
 
         if not coupon:
             raise HTTPException(
@@ -565,45 +399,28 @@ async def create_order(
 
         if (
             coupon.usage_limit is not None
-            and coupon.used_count
-            >= coupon.usage_limit
+            and coupon.used_count >= coupon.usage_limit
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "This coupon usage limit "
-                    "has been reached."
-                ),
+                detail="This coupon usage limit has been reached.",
             )
 
-        if (
-            subtotal
-            < float(
-                coupon.minimum_order_amount
-            )
-        ):
+        if subtotal < float(coupon.minimum_order_amount):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"Minimum order amount for this coupon "
-                    f"is ₹{float(coupon.minimum_order_amount):.2f}."
+                    "Minimum order amount for this coupon is "
+                    f"₹{float(coupon.minimum_order_amount):.2f}."
                 ),
             )
 
         if coupon.discount_type == "percentage":
             discount_amount = (
-                subtotal
-                * float(
-                    coupon.discount_value
-                )
-                / 100
+                subtotal * float(coupon.discount_value) / 100
             )
-
         elif coupon.discount_type == "fixed":
-            discount_amount = float(
-                coupon.discount_value
-            )
-
+            discount_amount = float(coupon.discount_value)
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -613,122 +430,53 @@ async def create_order(
         if coupon.maximum_discount is not None:
             discount_amount = min(
                 discount_amount,
-                float(
-                    coupon.maximum_discount
-                ),
+                float(coupon.maximum_discount),
             )
 
-        discount_amount = min(
-            discount_amount,
-            subtotal,
-        )
+        discount_amount = min(discount_amount, subtotal)
 
-    # -----------------------------------------------------
-    # FINAL TOTAL
-    # -----------------------------------------------------
+    total_amount = round(max(subtotal - discount_amount, 0), 2)
 
-    total_amount = max(
-        subtotal - discount_amount,
-        0,
+    # Create order. Online payments remain pending until verified.
+    order_status = (
+        "processing"
+        if order_data.payment_method == "cod"
+        else "pending"
     )
-
-    # -----------------------------------------------------
-    # ORDER STATUS
-    # -----------------------------------------------------
-
-    if order_data.payment_method == "cod":
-        order_status = "processing"
-    else:
-        order_status = "pending"
-
-    # -----------------------------------------------------
-    # CREATE ORDER
-    # -----------------------------------------------------
 
     order = Order(
         user_id=current_user.id,
-        total_amount=round(
-            total_amount,
-            2,
-        ),
-        discount_amount=round(
-            discount_amount,
-            2,
-        ),
+        total_amount=total_amount,
+        discount_amount=round(discount_amount, 2),
         coupon_code=coupon_code,
         status=order_status,
         payment_status="pending",
-        shipping_address=(
-            order_data.shipping_address
-        ),
+        shipping_address=order_data.shipping_address,
     )
 
     db.add(order)
-
     await db.flush()
-
-    # -----------------------------------------------------
-    # CREATE ORDER ITEMS
-    # -----------------------------------------------------
 
     order_items = []
 
     for item_data in order_data.items:
-        product = products_by_id[
-            item_data.product_id
-        ]
-
+        product = products_by_id[item_data.product_id]
         variant = None
 
         if item_data.variant_id is not None:
-            variant = variants_by_id.get(
-                item_data.variant_id
-            )
-
-            if not variant:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=(
-                        "Selected product variant "
-                        "was not found."
-                    ),
-                )
-
-            item_price = float(
-                variant.price
-            )
-
-            item_total = (
-                item_price
-                * item_data.quantity
-            )
-
-            variant.stock -= (
-                item_data.quantity
-            )
-
+            variant = variants_by_id[item_data.variant_id]
+            item_price = float(variant.price)
+            variant.stock -= item_data.quantity
         else:
-            item_price = float(
-                product.price
-            )
+            item_price = float(product.price)
+            product.stock -= item_data.quantity
 
-            item_total = (
-                item_price
-                * item_data.quantity
-            )
-
-            product.stock -= (
-                item_data.quantity
-            )
+        item_total = item_price * item_data.quantity
 
         order_item = OrderItem(
             order_id=order.id,
             product_id=product.id,
-            variant_id=(
-                variant.id
-                if variant
-                else None
-            ),
+            variant_id=variant.id if variant else None,
             seller_id=product.seller_id,
             quantity=item_data.quantity,
             price=item_price,
@@ -736,71 +484,43 @@ async def create_order(
         )
 
         db.add(order_item)
-
         order_items.append(order_item)
 
     await db.flush()
 
-    # =====================================================
-    # CASH ON DELIVERY
-    # =====================================================
-
+    # COD is unpaid at order creation. Online payment records are
+    # created by the corresponding payment endpoint.
     if order_data.payment_method == "cod":
-
-        cod_payment = Payment(
-            order_id=order.id,
-            user_id=current_user.id,
-            amount=round(
-                total_amount,
-                2,
-            ),
-            currency="INR",
-            payment_method="cod",
-            status="pending",
+        db.add(
+            Payment(
+                order_id=order.id,
+                user_id=current_user.id,
+                amount=total_amount,
+                currency="INR",
+                payment_method="cod",
+                status="pending",
+            )
         )
-
-        db.add(cod_payment)
 
         if coupon is not None:
             coupon.used_count += 1
 
-        seller_ids = {
-            item.seller_id
-            for item in order_items
-        }
+        seller_ids = {item.seller_id for item in order_items}
 
         for seller_id in seller_ids:
-            shipment = Shipment(
-                order_id=order.id,
-                seller_id=seller_id,
-                tracking_number=None,
-                status="processing",
+            db.add(
+                Shipment(
+                    order_id=order.id,
+                    seller_id=seller_id,
+                    tracking_number=None,
+                    status="processing",
+                )
             )
 
-            db.add(shipment)
-
-    # -----------------------------------------------------
-    # SAVE
-    # -----------------------------------------------------
-
     await db.commit()
-
     await db.refresh(order)
 
-    # -----------------------------------------------------
-    # BUILD ORDER ITEMS RESPONSE
-    # -----------------------------------------------------
-
-    item_response = (
-        await build_order_items_response(
-            db,
-            order_items,
-        )
-    )
-
-    # -----------------------------------------------------
-    # RETURN ORDER
-    # -----------------------------------------------------
+    item_response = await build_order_items_response(db, order_items)
 
     return OrderResponse(
         id=order.id,
@@ -821,10 +541,7 @@ async def create_order(
 # CUSTOMER - MY ORDERS
 # =========================================================
 
-@router.get(
-    "/my-orders",
-    response_model=list[OrderResponse],
-)
+@router.get("/my-orders", response_model=list[OrderResponse])
 async def get_my_orders(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -837,33 +554,19 @@ async def get_my_orders(
 
     result = await db.execute(
         select(Order)
-        .where(
-            Order.user_id == current_user.id
-        )
-        .order_by(
-            Order.created_at.desc()
-        )
+        .where(Order.user_id == current_user.id)
+        .order_by(Order.created_at.desc())
     )
-
     orders = result.scalars().all()
 
     response = []
 
     for order in orders:
         items_result = await db.execute(
-            select(OrderItem).where(
-                OrderItem.order_id == order.id
-            )
+            select(OrderItem).where(OrderItem.order_id == order.id)
         )
-
         items = items_result.scalars().all()
-
-        item_response = (
-            await build_order_items_response(
-                db,
-                items,
-            )
-        )
+        item_response = await build_order_items_response(db, items)
 
         response.append(
             OrderResponse(
@@ -874,9 +577,7 @@ async def get_my_orders(
                 coupon_code=order.coupon_code,
                 status=order.status,
                 payment_status=order.payment_status,
-                shipping_address=(
-                    order.shipping_address
-                ),
+                shipping_address=order.shipping_address,
                 created_at=order.created_at,
                 updated_at=order.updated_at,
                 items=item_response,
@@ -890,34 +591,18 @@ async def get_my_orders(
 # SELLER - SALES ANALYTICS
 # =========================================================
 
-@router.get(
-    "/seller/analytics",
-)
+@router.get("/seller/analytics")
 async def get_seller_analytics(
     db: AsyncSession = Depends(get_db),
     current_seller: User = Depends(get_current_seller),
 ):
     orders_result = await db.execute(
-        select(
-            Order.id,
-            Order.status,
-        )
-        .join(
-            OrderItem,
-            OrderItem.order_id == Order.id,
-        )
-        .where(
-            OrderItem.seller_id
-            == current_seller.id
-        )
+        select(Order.id, Order.status)
+        .join(OrderItem, OrderItem.order_id == Order.id)
+        .where(OrderItem.seller_id == current_seller.id)
         .distinct()
     )
-
     seller_orders = orders_result.all()
-
-    total_orders = len(
-        seller_orders
-    )
 
     status_counts = {
         "pending": 0,
@@ -929,96 +614,44 @@ async def get_seller_analytics(
 
     for order in seller_orders:
         if order.status in status_counts:
-            status_counts[
-                order.status
-            ] += 1
+            status_counts[order.status] += 1
 
     totals_result = await db.execute(
         select(
-            func.coalesce(
-                func.sum(
-                    OrderItem.quantity
-                ),
-                0,
-            ),
-            func.coalesce(
-                func.sum(
-                    OrderItem.total
-                ),
-                0,
-            ),
-        ).where(
-            OrderItem.seller_id
-            == current_seller.id
-        )
+            func.coalesce(func.sum(OrderItem.quantity), 0),
+            func.coalesce(func.sum(OrderItem.total), 0),
+        ).where(OrderItem.seller_id == current_seller.id)
     )
-
-    total_units, total_sales = (
-        totals_result.one()
-    )
+    total_units, total_sales = totals_result.one()
 
     top_products_result = await db.execute(
         select(
             OrderItem.product_id,
             Product.name,
-            func.sum(
-                OrderItem.quantity
-            ).label("units_sold"),
-            func.sum(
-                OrderItem.total
-            ).label("sales"),
+            func.sum(OrderItem.quantity).label("units_sold"),
+            func.sum(OrderItem.total).label("sales"),
         )
-        .join(
-            Product,
-            Product.id
-            == OrderItem.product_id,
-        )
-        .where(
-            OrderItem.seller_id
-            == current_seller.id
-        )
-        .group_by(
-            OrderItem.product_id,
-            Product.name,
-        )
-        .order_by(
-            func.sum(
-                OrderItem.quantity
-            ).desc()
-        )
+        .join(Product, Product.id == OrderItem.product_id)
+        .where(OrderItem.seller_id == current_seller.id)
+        .group_by(OrderItem.product_id, Product.name)
+        .order_by(func.sum(OrderItem.quantity).desc())
         .limit(5)
     )
 
-    top_products = (
-        top_products_result.all()
-    )
-
     return {
-        "total_orders": total_orders,
-        "total_units": int(
-            total_units or 0
-        ),
-        "total_sales": float(
-            total_sales or 0
-        ),
+        "total_orders": len(seller_orders),
+        "total_units": int(total_units or 0),
+        "total_sales": float(total_sales or 0),
         "orders_by_status": status_counts,
         "top_products": [
             {
                 "product_id": product_id,
                 "product_name": product_name,
-                "units_sold": int(
-                    units_sold or 0
-                ),
-                "sales": float(
-                    sales or 0
-                ),
+                "units_sold": int(units_sold or 0),
+                "sales": float(sales or 0),
             }
-            for (
-                product_id,
-                product_name,
-                units_sold,
-                sales,
-            ) in top_products
+            for product_id, product_name, units_sold, sales
+            in top_products_result.all()
         ],
     }
 
@@ -1027,78 +660,32 @@ async def get_seller_analytics(
 # SELLER - REVENUE BY DATE
 # =========================================================
 
-@router.get(
-    "/seller/revenue",
-)
+@router.get("/seller/revenue")
 async def get_seller_revenue(
     db: AsyncSession = Depends(get_db),
     current_seller: User = Depends(get_current_seller),
 ):
-    revenue_result = await db.execute(
+    result = await db.execute(
         select(
-            func.date(
-                Order.created_at
-            ).label("date"),
-            func.count(
-                func.distinct(Order.id)
-            ).label("orders"),
-            func.coalesce(
-                func.sum(
-                    OrderItem.quantity
-                ),
-                0,
-            ).label("units"),
-            func.coalesce(
-                func.sum(
-                    OrderItem.total
-                ),
-                0,
-            ).label("sales"),
+            func.date(Order.created_at).label("date"),
+            func.count(func.distinct(Order.id)).label("orders"),
+            func.coalesce(func.sum(OrderItem.quantity), 0).label("units"),
+            func.coalesce(func.sum(OrderItem.total), 0).label("sales"),
         )
-        .join(
-            OrderItem,
-            OrderItem.order_id
-            == Order.id,
-        )
-        .where(
-            OrderItem.seller_id
-            == current_seller.id
-        )
-        .group_by(
-            func.date(
-                Order.created_at
-            )
-        )
-        .order_by(
-            func.date(
-                Order.created_at
-            )
-        )
-    )
-
-    revenue_rows = (
-        revenue_result.all()
+        .join(OrderItem, OrderItem.order_id == Order.id)
+        .where(OrderItem.seller_id == current_seller.id)
+        .group_by(func.date(Order.created_at))
+        .order_by(func.date(Order.created_at))
     )
 
     return [
         {
             "date": str(date),
-            "orders": int(
-                orders or 0
-            ),
-            "units": int(
-                units or 0
-            ),
-            "sales": float(
-                sales or 0
-            ),
+            "orders": int(orders or 0),
+            "units": int(units or 0),
+            "sales": float(sales or 0),
         }
-        for (
-            date,
-            orders,
-            units,
-            sales,
-        ) in revenue_rows
+        for date, orders, units, sales in result.all()
     ]
 
 
@@ -1106,40 +693,26 @@ async def get_seller_revenue(
 # SELLER - MY ORDERS
 # =========================================================
 
-@router.get(
-    "/seller/orders",
-    response_model=list[OrderResponse],
-)
+@router.get("/seller/orders", response_model=list[OrderResponse])
 async def get_seller_orders(
     db: AsyncSession = Depends(get_db),
     current_seller: User = Depends(get_current_seller),
 ):
     seller_items_result = await db.execute(
         select(OrderItem.order_id)
-        .where(
-            OrderItem.seller_id
-            == current_seller.id
-        )
+        .where(OrderItem.seller_id == current_seller.id)
         .distinct()
     )
-
-    order_ids = (
-        seller_items_result.scalars().all()
-    )
+    order_ids = seller_items_result.scalars().all()
 
     if not order_ids:
         return []
 
     orders_result = await db.execute(
         select(Order)
-        .where(
-            Order.id.in_(order_ids)
-        )
-        .order_by(
-            Order.created_at.desc()
-        )
+        .where(Order.id.in_(order_ids))
+        .order_by(Order.created_at.desc())
     )
-
     orders = orders_result.scalars().all()
 
     response = []
@@ -1148,19 +721,11 @@ async def get_seller_orders(
         items_result = await db.execute(
             select(OrderItem).where(
                 OrderItem.order_id == order.id,
-                OrderItem.seller_id
-                == current_seller.id,
+                OrderItem.seller_id == current_seller.id,
             )
         )
-
         items = items_result.scalars().all()
-
-        item_response = (
-            await build_order_items_response(
-                db,
-                items,
-            )
-        )
+        item_response = await build_order_items_response(db, items)
 
         response.append(
             OrderResponse(
@@ -1170,12 +735,8 @@ async def get_seller_orders(
                 discount_amount=order.discount_amount,
                 coupon_code=order.coupon_code,
                 status=order.status,
-                payment_status=(
-                    order.payment_status
-                ),
-                shipping_address=(
-                    order.shipping_address
-                ),
+                payment_status=order.payment_status,
+                shipping_address=order.shipping_address,
                 created_at=order.created_at,
                 updated_at=order.updated_at,
                 items=item_response,
@@ -1189,10 +750,7 @@ async def get_seller_orders(
 # SELLER - UPDATE ORDER STATUS
 # =========================================================
 
-@router.patch(
-    "/seller/{order_id}/status",
-    response_model=OrderResponse,
-)
+@router.patch("/seller/{order_id}/status", response_model=OrderResponse)
 async def update_seller_order_status(
     order_id: int,
     new_status: str,
@@ -1210,18 +768,14 @@ async def update_seller_order_status(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "Invalid order status. "
-                "Allowed values: processing, shipped, "
-                "delivered, cancelled."
+                "Invalid order status. Allowed values: "
+                "processing, shipped, delivered, cancelled."
             ),
         )
 
     result = await db.execute(
-        select(Order).where(
-            Order.id == order_id
-        )
+        select(Order).where(Order.id == order_id)
     )
-
     order = result.scalar_one_or_none()
 
     if not order:
@@ -1233,46 +787,30 @@ async def update_seller_order_status(
     seller_item_result = await db.execute(
         select(OrderItem).where(
             OrderItem.order_id == order.id,
-            OrderItem.seller_id
-            == current_seller.id,
+            OrderItem.seller_id == current_seller.id,
         )
     )
-
-    seller_item = (
-        seller_item_result.scalar_one_or_none()
-    )
+    seller_item = seller_item_result.scalar_one_or_none()
 
     if not seller_item:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "You can only update orders "
-                "containing your products."
-            ),
+            detail="You can only update orders containing your products.",
         )
 
     order.status = new_status
 
     await db.commit()
-
     await db.refresh(order)
 
     items_result = await db.execute(
         select(OrderItem).where(
             OrderItem.order_id == order.id,
-            OrderItem.seller_id
-            == current_seller.id,
+            OrderItem.seller_id == current_seller.id,
         )
     )
-
     items = items_result.scalars().all()
-
-    item_response = (
-        await build_order_items_response(
-            db,
-            items,
-        )
-    )
+    item_response = await build_order_items_response(db, items)
 
     return OrderResponse(
         id=order.id,
@@ -1282,9 +820,7 @@ async def update_seller_order_status(
         coupon_code=order.coupon_code,
         status=order.status,
         payment_status=order.payment_status,
-        shipping_address=(
-            order.shipping_address
-        ),
+        shipping_address=order.shipping_address,
         created_at=order.created_at,
         updated_at=order.updated_at,
         items=item_response,
@@ -1295,9 +831,7 @@ async def update_seller_order_status(
 # CUSTOMER - CANCEL ORDER
 # =========================================================
 
-@router.patch(
-    "/{order_id}/cancel",
-)
+@router.patch("/{order_id}/cancel")
 async def cancel_order(
     order_id: int,
     db: AsyncSession = Depends(get_db),
@@ -1317,7 +851,6 @@ async def cancel_order(
         )
         .with_for_update()
     )
-
     order = result.scalar_one_or_none()
 
     if not order:
@@ -1326,63 +859,36 @@ async def cancel_order(
             detail="Order not found.",
         )
 
-    if order.status not in {
-        "pending",
-        "processing",
-    }:
+    if order.status not in {"pending", "processing"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Order cannot be cancelled because "
-                f"its current status is '{order.status}'."
+                f"Order cannot be cancelled because its current "
+                f"status is '{order.status}'."
             ),
         )
 
-    # -----------------------------------------------------
-    # GET SHIPMENTS
-    # -----------------------------------------------------
-
     shipments_result = await db.execute(
-        select(Shipment).where(
-            Shipment.order_id == order.id
+        select(Shipment).where(Shipment.order_id == order.id)
+    )
+    shipments = shipments_result.scalars().all()
+
+    if any(
+        shipment.status in {"shipped", "out_for_delivery", "delivered"}
+        for shipment in shipments
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This order cannot be cancelled because the shipment "
+                "has already been shipped."
+            ),
         )
-    )
-
-    shipments = (
-        shipments_result.scalars().all()
-    )
-
-    for shipment in shipments:
-        if shipment.status in {
-            "shipped",
-            "out_for_delivery",
-            "delivered",
-        }:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "This order cannot be cancelled because "
-                    "the shipment has already been shipped."
-                ),
-            )
-
-    # -----------------------------------------------------
-    # GET ORDER ITEMS
-    # -----------------------------------------------------
 
     items_result = await db.execute(
-        select(OrderItem).where(
-            OrderItem.order_id == order.id
-        )
+        select(OrderItem).where(OrderItem.order_id == order.id)
     )
-
-    order_items = (
-        items_result.scalars().all()
-    )
-
-    # -----------------------------------------------------
-    # GET PAYMENT
-    # -----------------------------------------------------
+    order_items = items_result.scalars().all()
 
     payment_result = await db.execute(
         select(Payment)
@@ -1390,227 +896,227 @@ async def cancel_order(
             Payment.order_id == order.id,
             Payment.user_id == current_user.id,
         )
-        .order_by(
-            Payment.created_at.desc()
-        )
+        .order_by(Payment.created_at.desc())
+        .with_for_update()
     )
+    payment = payment_result.scalars().first()
 
-    payment = (
-        payment_result.scalars().first()
-    )
+    # Stripe cancellation and refund handling.
+    if payment and payment.payment_method == "stripe":
+        if payment.status == "refunded":
+            order.payment_status = "refunded"
 
-    # -----------------------------------------------------
-    # HANDLE STRIPE PAYMENT
-    # -----------------------------------------------------
-
-    if (
-        payment
-        and payment.payment_method
-        == "stripe"
-    ):
-
-        if payment.status == "paid":
-
+        elif payment.status == "paid":
             if not payment.stripe_payment_intent_id:
                 await db.rollback()
-
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        "Stripe payment information "
-                        "is missing."
-                    ),
+                    detail="Stripe payment information is missing.",
                 )
 
             try:
-                refund = stripe.Refund.create(
-                    payment_intent=(
-                        payment.stripe_payment_intent_id
-                    )
+                payment_intent = stripe.PaymentIntent.retrieve(
+                    payment.stripe_payment_intent_id
                 )
 
-            except stripe.error.StripeError as exc:
-                await db.rollback()
+                if payment_intent.status != "succeeded":
+                    await db.rollback()
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            "The recorded payment status does not match "
+                            "Stripe. Please refresh your orders and try again."
+                        ),
+                    )
 
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=(
-                        "Unable to process the Stripe refund: "
-                        f"{str(exc)}"
+                refund = stripe.Refund.create(
+                    payment_intent=payment.stripe_payment_intent_id,
+                    idempotency_key=(
+                        f"shopsphere-cancel-order-{order.id}-"
+                        f"{payment.stripe_payment_intent_id}"
                     ),
                 )
 
+            except HTTPException:
+                raise
+            except stripe.error.StripeError as exc:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Unable to process the Stripe refund.",
+                ) from exc
+
             payment.status = "refunded"
             payment.transaction_id = refund.id
-
             order.payment_status = "refunded"
 
-        elif payment.status == "pending":
-
+        elif payment.status in {"pending", "failed"}:
             if payment.stripe_payment_intent_id:
-
                 try:
-                    payment_intent = (
-                        stripe.PaymentIntent.retrieve(
-                            payment.stripe_payment_intent_id
-                        )
+                    payment_intent = stripe.PaymentIntent.retrieve(
+                        payment.stripe_payment_intent_id
                     )
+                    intent_status = payment_intent.status
 
-                    if payment_intent.status in {
+                    if intent_status == "succeeded":
+                        refund = stripe.Refund.create(
+                            payment_intent=payment.stripe_payment_intent_id,
+                            idempotency_key=(
+                                f"shopsphere-cancel-order-{order.id}-"
+                                f"{payment.stripe_payment_intent_id}"
+                            ),
+                        )
+                        payment.status = "refunded"
+                        payment.transaction_id = refund.id
+                        order.payment_status = "refunded"
+
+                    elif intent_status == "canceled":
+                        payment.status = "cancelled"
+                        order.payment_status = "cancelled"
+
+                    elif intent_status in {
                         "requires_payment_method",
                         "requires_confirmation",
                         "requires_action",
+                        "requires_capture",
                     }:
                         stripe.PaymentIntent.cancel(
                             payment.stripe_payment_intent_id
                         )
+                        payment.status = "cancelled"
+                        order.payment_status = "cancelled"
 
+                    elif intent_status == "processing":
+                        await db.rollback()
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=(
+                                "Your payment is still processing. "
+                                "Check your order status before cancelling."
+                            ),
+                        )
+
+                    else:
+                        await db.rollback()
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=(
+                                "Stripe payment status has changed. "
+                                "Refresh your orders before trying again."
+                            ),
+                        )
+
+                except HTTPException:
+                    raise
                 except stripe.error.StripeError as exc:
                     await db.rollback()
-
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail=(
-                            "Unable to cancel the Stripe payment: "
-                            f"{str(exc)}"
-                        ),
-                    )
+                        detail="Unable to verify or cancel the Stripe payment.",
+                    ) from exc
+            else:
+                payment.status = "cancelled"
+                order.payment_status = "cancelled"
 
-            payment.status = "cancelled"
-
+        elif payment.status == "cancelled":
             order.payment_status = "cancelled"
 
-        elif payment.status in {
-            "failed",
-            "cancelled",
-            "refunded",
-        }:
-            order.payment_status = (
-                payment.status
+        else:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This payment cannot be cancelled automatically. "
+                    "Please contact support."
+                ),
             )
 
-    # -----------------------------------------------------
-    # HANDLE COD PAYMENT
-    # -----------------------------------------------------
-
-    elif (
-        payment
-        and payment.payment_method
-        == "cod"
-    ):
-
+    # COD orders are unpaid and can be cancelled without a refund.
+    elif payment and payment.payment_method == "cod":
         payment.status = "cancelled"
-
         order.payment_status = "cancelled"
-
-    # -----------------------------------------------------
-    # NO PAYMENT RECORD
-    # -----------------------------------------------------
 
     elif not payment:
-
         order.payment_status = "cancelled"
 
-    # -----------------------------------------------------
-    # RESTORE STOCK
-    # -----------------------------------------------------
+    # Razorpay orders require provider-aware handling. Do not mark
+    # a captured Razorpay payment as cancelled without a refund.
+    elif payment.payment_method == "razorpay":
+        if payment.status == "paid":
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This Razorpay payment has already been captured. "
+                    "A verified refund must be processed before cancelling."
+                ),
+            )
 
+        if payment.status == "pending":
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Verify that the Razorpay payment has not succeeded "
+                    "before cancelling this order."
+                ),
+            )
+
+        payment.status = "cancelled"
+        order.payment_status = "cancelled"
+
+    # Restore stock.
     for order_item in order_items:
-
         if order_item.variant_id is not None:
-
             variant_result = await db.execute(
                 select(ProductVariant)
-                .where(
-                    ProductVariant.id
-                    == order_item.variant_id
-                )
+                .where(ProductVariant.id == order_item.variant_id)
                 .with_for_update()
             )
-
-            variant = (
-                variant_result.scalar_one_or_none()
-            )
+            variant = variant_result.scalar_one_or_none()
 
             if variant:
-                variant.stock += (
-                    order_item.quantity
-                )
-
+                variant.stock += order_item.quantity
         else:
-
             product_result = await db.execute(
                 select(Product)
-                .where(
-                    Product.id
-                    == order_item.product_id
-                )
+                .where(Product.id == order_item.product_id)
                 .with_for_update()
             )
-
-            product = (
-                product_result.scalar_one_or_none()
-            )
+            product = product_result.scalar_one_or_none()
 
             if product:
-                product.stock += (
-                    order_item.quantity
-                )
+                product.stock += order_item.quantity
 
-    # -----------------------------------------------------
-    # RESTORE COUPON USAGE
-    # -----------------------------------------------------
-
-    should_reduce_coupon = False
-
-    if order.coupon_code and payment:
-
-        if payment.payment_method == "cod":
-            should_reduce_coupon = True
-
-        elif (
-            payment.payment_method == "stripe"
-            and payment.status == "refunded"
-        ):
-            should_reduce_coupon = True
+    should_reduce_coupon = bool(
+        order.coupon_code
+        and payment
+        and (
+            payment.payment_method == "cod"
+            or (
+                payment.payment_method == "stripe"
+                and payment.status == "refunded"
+            )
+        )
+    )
 
     if should_reduce_coupon:
-
         coupon_result = await db.execute(
             select(Coupon)
-            .where(
-                Coupon.code
-                == order.coupon_code
-            )
+            .where(Coupon.code == order.coupon_code)
             .with_for_update()
         )
-
-        coupon = (
-            coupon_result.scalar_one_or_none()
-        )
+        coupon = coupon_result.scalar_one_or_none()
 
         if coupon and coupon.used_count > 0:
             coupon.used_count -= 1
 
-    # -----------------------------------------------------
-    # CANCEL ORDER
-    # -----------------------------------------------------
-
     order.status = "cancelled"
-
-    # -----------------------------------------------------
-    # DELETE PROCESSING SHIPMENTS
-    # -----------------------------------------------------
 
     for shipment in shipments:
         await db.delete(shipment)
 
-    # -----------------------------------------------------
-    # SAVE
-    # -----------------------------------------------------
-
     await db.commit()
-
     await db.refresh(order)
 
     return {
@@ -1625,21 +1131,15 @@ async def cancel_order(
 # GET SINGLE ORDER
 # =========================================================
 
-@router.get(
-    "/{order_id}",
-    response_model=OrderResponse,
-)
+@router.get("/{order_id}", response_model=OrderResponse)
 async def get_order(
     order_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(Order).where(
-            Order.id == order_id
-        )
+        select(Order).where(Order.id == order_id)
     )
-
     order = result.scalar_one_or_none()
 
     if not order:
@@ -1648,83 +1148,45 @@ async def get_order(
             detail="Order not found.",
         )
 
-    # -----------------------------------------------------
-    # CHECK ACCESS
-    # -----------------------------------------------------
-
     if current_user.role == "customer":
-
         if order.user_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "You can only view your own orders."
-                ),
+                detail="You can only view your own orders.",
             )
 
     elif current_user.role == "seller":
-
         seller_item_result = await db.execute(
             select(OrderItem).where(
                 OrderItem.order_id == order.id,
-                OrderItem.seller_id
-                == current_user.id,
+                OrderItem.seller_id == current_user.id,
             )
         )
 
-        seller_item = (
-            seller_item_result.scalar_one_or_none()
-        )
-
-        if not seller_item:
+        if not seller_item_result.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "You can only view orders "
-                    "containing your products."
-                ),
+                detail="You can only view orders containing your products.",
             )
 
     elif current_user.role != "admin":
-
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "You are not allowed to view this order."
-            ),
+            detail="You are not allowed to view this order.",
         )
-
-    # -----------------------------------------------------
-    # GET ORDER ITEMS
-    # -----------------------------------------------------
 
     items_query = select(OrderItem).where(
         OrderItem.order_id == order.id
     )
 
     if current_user.role == "seller":
-
         items_query = items_query.where(
-            OrderItem.seller_id
-            == current_user.id
+            OrderItem.seller_id == current_user.id
         )
 
-    items_result = await db.execute(
-        items_query
-    )
-
+    items_result = await db.execute(items_query)
     items = items_result.scalars().all()
-
-    item_response = (
-        await build_order_items_response(
-            db,
-            items,
-        )
-    )
-
-    # -----------------------------------------------------
-    # RETURN ORDER
-    # -----------------------------------------------------
+    item_response = await build_order_items_response(db, items)
 
     return OrderResponse(
         id=order.id,
@@ -1734,9 +1196,7 @@ async def get_order(
         coupon_code=order.coupon_code,
         status=order.status,
         payment_status=order.payment_status,
-        shipping_address=(
-            order.shipping_address
-        ),
+        shipping_address=order.shipping_address,
         created_at=order.created_at,
         updated_at=order.updated_at,
         items=item_response,

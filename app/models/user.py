@@ -1,3 +1,4 @@
+
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -6,100 +7,76 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
-
 if TYPE_CHECKING:
     from app.models.product import Product
     from app.models.cart import Cart
     from app.models.order import Order
     from app.models.payment import Payment
     from app.models.wishlist import Wishlist
-    from app.models.review import Review 
+    from app.models.review import Review
+
 
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(
-        primary_key=True,
-        index=True,
-    )
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
     full_name: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
+        String(100), nullable=False
     )
 
     email: Mapped[str] = mapped_column(
-        String(255),
-        unique=True,
-        index=True,
-        nullable=False,
+        String(255), unique=True, index=True, nullable=False
     )
 
     phone: Mapped[str | None] = mapped_column(
-        String(20),
-        nullable=True,
+        String(20), nullable=True
     )
 
     password_hash: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
+        String(255), nullable=False
     )
 
     role: Mapped[str] = mapped_column(
-        String(20),
-        default="customer",
-        nullable=False,
+        String(20), default="customer", nullable=False
     )
 
     is_active: Mapped[bool] = mapped_column(
-        Boolean,
-        default=True,
-        nullable=False,
+        Boolean, default=True, nullable=False
     )
 
     is_verified: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        nullable=False,
+        Boolean, default=False, nullable=False
+    )
+
+    # Stripe customer used for saved payment methods.
+    stripe_customer_id: Mapped[str | None] = mapped_column(
+        String(255), unique=True, index=True, nullable=True
     )
 
     refresh_token: Mapped[str | None] = mapped_column(
-        String(500),
-        nullable=True,
+        String(500), nullable=True
     )
 
     reset_token: Mapped[str | None] = mapped_column(
-        String(255),
-        nullable=True,
+        String(255), nullable=True
     )
 
     reset_token_expires: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
+        DateTime(timezone=True), nullable=True
     )
 
     verification_code: Mapped[str | None] = mapped_column(
-        String(10),
-        nullable=True,
+        String(10), nullable=True
     )
 
     verification_code_expires: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
+        DateTime(timezone=True), nullable=True
     )
-
-    # =========================================================
-    # SELLER PRODUCTS
-    # =========================================================
 
     products: Mapped[list["Product"]] = relationship(
-        "Product",
-        back_populates="seller",
+        "Product", back_populates="seller"
     )
-
-    # =========================================================
-    # CUSTOMER CART
-    # =========================================================
 
     cart: Mapped["Cart | None"] = relationship(
         "Cart",
@@ -108,33 +85,21 @@ class User(Base):
         cascade="all, delete-orphan",
     )
 
-    # =========================================================
-    # PROFILE / EMAIL CHANGE
-    # =========================================================
-
     gender: Mapped[str | None] = mapped_column(
-        String(30),
-        nullable=True,
+        String(30), nullable=True
     )
 
     pending_email: Mapped[str | None] = mapped_column(
-        String(255),
-        nullable=True,
+        String(255), nullable=True
     )
 
     email_change_code: Mapped[str | None] = mapped_column(
-        String(10),
-        nullable=True,
+        String(10), nullable=True
     )
 
     email_change_code_expires: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
+        DateTime(timezone=True), nullable=True
     )
-
-    # =========================================================
-    # CUSTOMER ORDERS
-    # =========================================================
 
     orders: Mapped[list["Order"]] = relationship(
         "Order",
@@ -142,19 +107,11 @@ class User(Base):
         cascade="all, delete-orphan",
     )
 
-    # =========================================================
-    # CUSTOMER PAYMENTS
-    # =========================================================
-
     payments: Mapped[list["Payment"]] = relationship(
         "Payment",
         back_populates="user",
         cascade="all, delete-orphan",
     )
-
-    # =========================================================
-    # CUSTOMER WISHLIST
-    # =========================================================
 
     wishlists: Mapped[list["Wishlist"]] = relationship(
         "Wishlist",
@@ -162,13 +119,8 @@ class User(Base):
         cascade="all, delete-orphan",
     )
 
-
-    #==========================================================
-    # CUSTOMER REVIEW
-    #==========================================================
-
     reviews: Mapped[list["Review"]] = relationship(
-       "Review",
-       back_populates="user",
-       cascade="all, delete-orphan",
+        "Review",
+        back_populates="user",
+        cascade="all, delete-orphan",
     )
