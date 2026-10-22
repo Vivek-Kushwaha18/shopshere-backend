@@ -124,8 +124,8 @@ def create_razorpay_qr_via_api(
     """
     Create a Razorpay UPI QR code using the REST API.
 
-    Logs the exact request URL, HTTP status, and provider error
-    without logging credentials or authorization headers.
+    Logs the request URL, HTTP status, and provider error without
+    logging credentials or authorization headers.
     """
     url = f"{RAZORPAY_API_BASE_URL}/payments/qr_codes"
 
@@ -233,22 +233,116 @@ async def get_customer_order(
     return order
 
 
+def get_stripe_address_from_order(order: Order) -> dict[str, Any]:
+    """
+    Read the existing ShopSphere checkout address.
+
+    Expected format:
+        Name: Customer Name
+        Phone: 9876543210
+        Address: House or street address
+        City: City name
+        State: State name
+        Postal Code: 123456
+
+    This checkout currently stores address information as plain text.
+    """
+    address_data: dict[str, str] = {}
+
+    for line in (order.shipping_address or "").splitlines():
+        key, separator, value = line.partition(":")
+
+        if separator:
+            address_data[key.strip().lower()] = value.strip()
+
+    name = address_data.get("name", "").strip()
+    address_line = address_data.get("address", "").strip()
+    city = address_data.get("city", "").strip()
+    state_name = address_data.get("state", "").strip()
+    postal_code = address_data.get("postal code", "").strip()
+    phone = address_data.get("phone", "").strip()
+
+    if not name or not address_line or not city or not state_name or not postal_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Your checkout shipping address is incomplete. "
+                "Please provide your name, street address, city, "
+                "state, and postal code before paying."
+            ),
+        )
+
+    stripe_address: dict[str, Any] = {
+        "line1": address_line,
+        "city": city,
+        "state": state_name,
+        "postal_code": postal_code,
+        "country": "IN",
+    }
+
+    return {
+        "name": name,
+        "phone": phone,
+        "address": stripe_address,
+    }
+
+
 async def get_or_create_stripe_customer(
     user: User,
     db: AsyncSession,
+    order: Order,
 ) -> str:
+    """
+    Create or update the Stripe Customer with the customer's
+    actual Indian address before initializing a payment.
+    """
     if not STRIPE_SECRET_KEY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Stripe payment service is not configured.",
         )
 
+    address_data = get_stripe_address_from_order(order)
+
+    customer_name = address_data["name"]
+    customer_phone = address_data["phone"]
+    customer_address = address_data["address"]
+
+    # The current checkout does not collect a separate billing address.
+    # Therefore, the shipping address is used as the billing address.
+    customer_shipping: dict[str, Any] = {
+        "name": customer_name,
+        "address": customer_address,
+    }
+
+    if customer_phone:
+        customer_shipping["phone"] = customer_phone
+
+    customer_parameters: dict[str, Any] = {
+        "name": customer_name,
+        "email": user.email,
+        "address": customer_address,
+        "shipping": customer_shipping,
+        "metadata": {
+            "shopsphere_user_id": str(user.id),
+        },
+    }
+
+    if customer_phone:
+        customer_parameters["phone"] = customer_phone
+
     if user.stripe_customer_id:
         try:
-            customer = stripe.Customer.retrieve(user.stripe_customer_id)
+            customer = stripe.Customer.retrieve(
+                user.stripe_customer_id
+            )
 
             if not getattr(customer, "deleted", False):
-                return user.stripe_customer_id
+                customer = stripe.Customer.modify(
+                    user.stripe_customer_id,
+                    **customer_parameters,
+                )
+                return customer.id
 
         except stripe.error.InvalidRequestError:
             logger.warning(
@@ -258,20 +352,18 @@ async def get_or_create_stripe_customer(
 
         except stripe.error.StripeError as exc:
             raise stripe_error(
-                "Unable to retrieve the Stripe customer account.",
+                "Unable to update the Stripe customer address.",
                 exc,
             )
 
     try:
         customer = stripe.Customer.create(
-            name=user.full_name,
-            email=user.email,
-            metadata={"shopsphere_user_id": str(user.id)},
+            **customer_parameters,
             idempotency_key=f"shopsphere-customer-{user.id}",
         )
     except stripe.error.StripeError as exc:
         raise stripe_error(
-            "Unable to prepare the Stripe customer account.",
+            "Unable to prepare the Stripe customer address.",
             exc,
         )
 
@@ -437,6 +529,7 @@ async def create_payment_intent(
     customer_id = await get_or_create_stripe_customer(
         current_user,
         db,
+        order,
     )
 
     options: dict[str, Any] = {
@@ -546,8 +639,11 @@ async def create_saved_card_payment_intent(
         )
 
     order = await get_customer_order(data.order_id, current_user, db)
+
     customer_id = await get_or_create_stripe_customer(
-        current_user, db
+        current_user,
+        db,
+        order,
     )
 
     try:
