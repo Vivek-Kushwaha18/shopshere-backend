@@ -1,19 +1,11 @@
 
 from datetime import datetime
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    status,
-)
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import (
-    get_current_seller,
-    get_current_user,
-)
+from app.core.dependencies import get_current_seller, get_current_user
 from app.database.database import get_db
 from app.models.order import Order
 from app.models.payment import Payment
@@ -21,11 +13,12 @@ from app.models.shipment import Shipment
 from app.models.user import User
 
 
-router = APIRouter(
-    prefix="/shipments",
-    tags=["Shipments"],
-)
+router = APIRouter(prefix="/shipments", tags=["Shipments"])
 
+
+# =========================================================
+# SERIALIZE SHIPMENT
+# =========================================================
 
 def serialize_shipment(shipment: Shipment):
     return {
@@ -44,6 +37,78 @@ def serialize_shipment(shipment: Shipment):
 
 
 # =========================================================
+# SYNCHRONIZE ORDER STATUS WITH ALL ITS SHIPMENTS
+# =========================================================
+
+async def synchronize_order_status(
+    db: AsyncSession,
+    order: Order,
+):
+    result = await db.execute(
+        select(Shipment.status).where(
+            Shipment.order_id == order.id
+        )
+    )
+
+    shipment_statuses = [
+        (shipment_status or "processing").strip().lower()
+        for shipment_status in result.scalars().all()
+    ]
+
+    # Never overwrite a cancelled order.
+    if order.status == "cancelled" or not shipment_statuses:
+        return shipment_statuses
+
+    all_delivered = all(
+        shipment_status == "delivered"
+        for shipment_status in shipment_statuses
+    )
+
+    any_shipped = any(
+        shipment_status in {
+            "shipped",
+            "out_for_delivery",
+            "delivered",
+        }
+        for shipment_status in shipment_statuses
+    )
+
+    if all_delivered:
+        order.status = "delivered"
+    elif any_shipped:
+        order.status = "shipped"
+    else:
+        order.status = "processing"
+
+    # Mark COD payment as paid only after all shipments arrive.
+    if all_delivered:
+        payment_result = await db.execute(
+            select(Payment).where(
+                Payment.order_id == order.id
+            )
+        )
+
+        payments = payment_result.scalars().all()
+
+        cod_methods = {
+            "cod",
+            "cash_on_delivery",
+            "cash on delivery",
+        }
+
+        for payment in payments:
+            payment_method = (
+                payment.payment_method or ""
+            ).strip().lower()
+
+            if payment_method in cod_methods:
+                payment.status = "paid"
+                order.payment_status = "paid"
+
+    return shipment_statuses
+
+
+# =========================================================
 # SELLER - GET MY SHIPMENTS
 # =========================================================
 
@@ -58,11 +123,9 @@ async def get_my_shipments(
         .order_by(Shipment.created_at.desc())
     )
 
-    shipments = result.scalars().all()
-
     return [
         serialize_shipment(shipment)
-        for shipment in shipments
+        for shipment in result.scalars().all()
     ]
 
 
@@ -138,10 +201,6 @@ async def update_shipment_status(
             detail="Shipment not found.",
         )
 
-    # -----------------------------------------------------
-    # PREVENT MOVING BACKWARD
-    # -----------------------------------------------------
-
     status_order = {
         "processing": 1,
         "shipped": 2,
@@ -153,163 +212,69 @@ async def update_shipment_status(
         shipment.status or "processing"
     ).strip().lower()
 
-    current_status_number = status_order.get(
-        current_status,
-        0,
-    )
-
-    new_status_number = status_order[new_status]
-
-    if new_status_number < current_status_number:
+    if current_status not in status_order:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_409_CONFLICT,
             detail=(
-                f"Shipment cannot move from "
-                f"'{current_status}' back to '{new_status}'."
+                f"Shipment has an unrecognized current status: "
+                f"'{current_status}'."
             ),
         )
 
-    # -----------------------------------------------------
-    # UPDATE SHIPMENT STATUS AND TIMESTAMPS
-    # -----------------------------------------------------
+    if status_order[new_status] < status_order[current_status]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Shipment cannot move from '{current_status}' "
+                f"back to '{new_status}'."
+            ),
+        )
 
     shipment.status = new_status
-
     now = datetime.utcnow()
 
     if new_status in {
         "shipped",
         "out_for_delivery",
         "delivered",
-    }:
-        if shipment.shipped_at is None:
-            shipment.shipped_at = now
+    } and shipment.shipped_at is None:
+        shipment.shipped_at = now
 
     if new_status in {
         "out_for_delivery",
         "delivered",
-    }:
-        if shipment.out_for_delivery_at is None:
-            shipment.out_for_delivery_at = now
+    } and shipment.out_for_delivery_at is None:
+        shipment.out_for_delivery_at = now
 
-    if new_status == "delivered":
-        if shipment.delivered_at is None:
-            shipment.delivered_at = now
+    if new_status == "delivered" and shipment.delivered_at is None:
+        shipment.delivered_at = now
 
-    # Ensure the updated shipment is written before
-    # calculating the overall order status.
-    await db.flush()
+    try:
+        await db.flush()
 
-    # -----------------------------------------------------
-    # GET ORDER
-    # -----------------------------------------------------
-
-    order_result = await db.execute(
-        select(Order).where(
-            Order.id == shipment.order_id
-        )
-    )
-
-    order = order_result.scalar_one_or_none()
-
-    if order is None:
-        await db.rollback()
-
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Associated order not found.",
+        order_result = await db.execute(
+            select(Order)
+            .where(Order.id == shipment.order_id)
+            .with_for_update()
         )
 
-    # -----------------------------------------------------
-    # UPDATE CUSTOMER ORDER STATUS
-    #
-    # All shipments delivered -> order delivered
-    # Any shipment shipped/delivered -> order shipped
-    # Otherwise -> order processing
-    # -----------------------------------------------------
+        order = order_result.scalar_one_or_none()
 
-    shipment_result = await db.execute(
-        select(Shipment.status).where(
-            Shipment.order_id == order.id
-        )
-    )
-
-    shipment_statuses = [
-        (shipment_status or "processing").strip().lower()
-        for shipment_status in shipment_result.scalars().all()
-    ]
-
-    if shipment_statuses and order.status != "cancelled":
-        all_shipments_delivered = all(
-            shipment_status == "delivered"
-            for shipment_status in shipment_statuses
-        )
-
-        any_shipment_shipped = any(
-            shipment_status in {
-                "shipped",
-                "out_for_delivery",
-                "delivered",
-            }
-            for shipment_status in shipment_statuses
-        )
-
-        if all_shipments_delivered:
-            order.status = "delivered"
-        elif any_shipment_shipped:
-            order.status = "shipped"
-        else:
-            order.status = "processing"
-
-    # -----------------------------------------------------
-    # COD: MARK PAYMENT PAID ONLY AFTER ALL SHIPMENTS
-    # HAVE BEEN DELIVERED
-    # -----------------------------------------------------
-
-    if (
-        new_status == "delivered"
-        and shipment_statuses
-        and all(
-            shipment_status == "delivered"
-            for shipment_status in shipment_statuses
-        )
-    ):
-        payment_result = await db.execute(
-            select(Payment).where(
-                Payment.order_id == order.id
+        if order is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Associated order not found.",
             )
-        )
 
-        payments = payment_result.scalars().all()
+        await synchronize_order_status(db, order)
 
-        cod_methods = {
-            "cod",
-            "cash_on_delivery",
-            "cash on delivery",
-        }
+        await db.commit()
+        await db.refresh(shipment)
+        await db.refresh(order)
 
-        cod_payments = [
-            payment
-            for payment in payments
-            if payment.payment_method
-            and payment.payment_method.strip().lower()
-            in cod_methods
-        ]
-
-        # Do not change the payment status of online payments.
-        if cod_payments:
-            order.payment_status = "paid"
-
-            for payment in cod_payments:
-                payment.status = "paid"
-
-    # -----------------------------------------------------
-    # SAVE SHIPMENT, ORDER, AND PAYMENT CHANGES
-    # -----------------------------------------------------
-
-    await db.commit()
-    await db.refresh(shipment)
-    await db.refresh(order)
+    except Exception:
+        await db.rollback()
+        raise
 
     return {
         "message": "Shipment and order status updated successfully.",
@@ -360,9 +325,7 @@ async def update_tracking_number(
         )
     )
 
-    existing_shipment = existing_result.scalar_one_or_none()
-
-    if existing_shipment:
+    if existing_result.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This tracking number is already in use.",
@@ -389,9 +352,11 @@ async def get_customer_order_shipments(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # -----------------------------------------------------
-    # CHECK ORDER BELONGS TO CURRENT CUSTOMER
-    # -----------------------------------------------------
+    if current_user.role != "customer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only customers can view their order shipments.",
+        )
 
     order_result = await db.execute(
         select(Order).where(
@@ -408,10 +373,6 @@ async def get_customer_order_shipments(
             detail="Order not found.",
         )
 
-    # -----------------------------------------------------
-    # GET SHIPMENTS
-    # -----------------------------------------------------
-
     shipment_result = await db.execute(
         select(Shipment)
         .where(Shipment.order_id == order_id)
@@ -419,10 +380,6 @@ async def get_customer_order_shipments(
     )
 
     shipments = shipment_result.scalars().all()
-
-    # -----------------------------------------------------
-    # RETURN TRACKING DATA
-    # -----------------------------------------------------
 
     return {
         "order_id": order.id,
