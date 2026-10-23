@@ -1,3 +1,4 @@
+
 from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field
@@ -35,6 +36,17 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+# =========================================================
+# GOOGLE LOGIN
+# =========================================================
+
+class GoogleLoginRequest(BaseModel):
+    credential: str = Field(
+        min_length=1,
+        max_length=10000,
+    )
 
 
 # =========================================================
@@ -90,7 +102,6 @@ class ResetPasswordRequest(BaseModel):
 
 # =========================================================
 # USER RESPONSE
-# USED BY AUTHENTICATION
 # =========================================================
 
 class UserResponse(BaseModel):
@@ -133,10 +144,6 @@ class ProfileResponse(BaseModel):
 
 # =========================================================
 # PROFILE UPDATE
-# FULL NAME + PHONE + GENDER
-#
-# EMAIL IS NOT UPDATED HERE.
-# EMAIL HAS A SEPARATE OTP FLOW.
 # =========================================================
 
 class ProfileUpdateRequest(BaseModel):
