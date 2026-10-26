@@ -36,6 +36,7 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    remember_me: bool = False
 
 
 # =========================================================
@@ -47,6 +48,7 @@ class GoogleLoginRequest(BaseModel):
         min_length=1,
         max_length=10000,
     )
+    remember_me: bool = False
 
 
 # =========================================================
@@ -69,6 +71,7 @@ class VerifyEmailRequest(BaseModel):
         max_length=6,
         pattern=r"^\d{6}$",
     )
+    remember_me: bool = False
 
 
 # =========================================================
@@ -76,7 +79,8 @@ class VerifyEmailRequest(BaseModel):
 # =========================================================
 
 class RefreshTokenRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str | None = None
+    remember_me: bool = False
 
 
 # =========================================================

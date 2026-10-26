@@ -9,16 +9,20 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     HTTPException,
+    Request,
+    Response,
     status,
 )
 from fastapi.security import (
     HTTPAuthorizationCredentials,
     HTTPBearer,
 )
+from starlette.concurrency import run_in_threadpool
 
 from google.auth.exceptions import TransportError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
+from jose import JWTError
 
 from pwdlib import PasswordHash
 
@@ -27,6 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import (
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS,
     create_access_token,
     create_refresh_token,
     create_reset_token,
@@ -63,6 +68,56 @@ from app.services.email import send_email
 # =========================================================
 
 logger = logging.getLogger(__name__)
+REFRESH_COOKIE_NAME = "shopsphere_refresh"
+
+
+def set_refresh_cookie(
+    response: Response,
+    request: Request,
+    token: str,
+    persistent: bool,
+) -> None:
+    secure_setting = os.getenv("AUTH_COOKIE_SECURE")
+    secure = (
+        secure_setting.lower() == "true"
+        if secure_setting is not None
+        else request.url.scheme == "https"
+        or request.url.hostname not in {"localhost", "127.0.0.1"}
+    )
+    same_site = os.getenv(
+        "AUTH_COOKIE_SAMESITE",
+        "none" if secure else "lax",
+    ).lower()
+
+    if same_site == "none":
+        secure = True
+
+    if not persistent:
+        response.delete_cookie(
+            key=REFRESH_COOKIE_NAME,
+            path="/auth",
+            secure=secure,
+            httponly=True,
+            samesite=same_site,
+        )
+        return
+
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        max_age=JWT_REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        path="/auth",
+        secure=secure,
+        httponly=True,
+        samesite=same_site,
+    )
+
+
+def clear_refresh_cookie(
+    response: Response,
+    request: Request,
+) -> None:
+    set_refresh_cookie(response, request, "", persistent=False)
 
 
 # =========================================================
@@ -92,10 +147,10 @@ def build_auth_response(
     user: User,
     access_token: str,
     refresh_token: str,
+    include_refresh_token: bool = True,
 ):
-    return {
+    response = {
         "access_token": access_token,
-        "refresh_token": refresh_token,
         "token_type": "bearer",
         "user": {
             "id": user.id,
@@ -108,6 +163,9 @@ def build_auth_response(
             "is_verified": user.is_verified,
         },
     }
+    if include_refresh_token:
+        response["refresh_token"] = refresh_token
+    return response
 
 
 # =========================================================
@@ -495,6 +553,8 @@ async def verify_email(
 @router.post("/login")
 async def login(
     login_data: LoginRequest,
+    request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     email = str(login_data.email).strip().lower()
@@ -510,7 +570,8 @@ async def login(
             detail="Invalid email or password",
         )
 
-    if not password_hash.verify(
+    if not await run_in_threadpool(
+        password_hash.verify,
         login_data.password,
         user.password_hash,
     ):
@@ -543,9 +604,19 @@ async def login(
     user.refresh_token = refresh_token
 
     await db.commit()
-    await db.refresh(user)
+    set_refresh_cookie(
+        response,
+        request,
+        refresh_token,
+        persistent=True,
+    )
 
-    return build_auth_response(user, access_token, refresh_token)
+    return build_auth_response(
+        user,
+        access_token,
+        refresh_token,
+        include_refresh_token=False,
+    )
 
 
 # =========================================================
@@ -556,6 +627,8 @@ async def login(
 @router.post("/google")
 async def google_login(
     request: GoogleLoginRequest,
+    http_request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
@@ -579,7 +652,8 @@ async def google_login(
         )
 
     try:
-        claims = id_token.verify_oauth2_token(
+        claims = await run_in_threadpool(
+            id_token.verify_oauth2_token,
             credential,
             google_requests.Request(),
             audience=client_id,
@@ -664,12 +738,18 @@ async def google_login(
         user.refresh_token = refresh_token
 
         await db.commit()
-        await db.refresh(user)
+        set_refresh_cookie(
+            response,
+            http_request,
+            refresh_token,
+            persistent=True,
+        )
 
         return build_auth_response(
             user,
             access_token,
             refresh_token,
+            include_refresh_token=False,
         )
 
     # Create a new Google account as an unverified customer.
@@ -772,11 +852,18 @@ async def google_login(
 
     await db.commit()
     await db.refresh(user)
+    set_refresh_cookie(
+        response,
+        http_request,
+        refresh_token,
+        persistent=True,
+    )
 
     return build_auth_response(
         user,
         access_token,
         refresh_token,
+        include_refresh_token=False,
     )
 
 
@@ -788,6 +875,8 @@ async def google_login(
 @router.post("/google/verify-otp")
 async def verify_google_otp(
     request: VerifyEmailRequest,
+    http_request: Request,
+    http_response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     email = str(request.email).strip().lower()
@@ -862,14 +951,22 @@ async def verify_google_otp(
             detail="Unable to complete verification. Please try again.",
         )
 
-    response = build_auth_response(
+    auth_response = build_auth_response(
         user,
         access_token,
         refresh_token,
+        include_refresh_token=False,
     )
-    response["message"] = "Google signup verified successfully."
+    auth_response["message"] = "Google signup verified successfully."
 
-    return response
+    set_refresh_cookie(
+        http_response,
+        http_request,
+        refresh_token,
+        persistent=True,
+    )
+
+    return auth_response
 
 
 # =========================================================
@@ -935,11 +1032,21 @@ async def resend_google_otp(
 @router.post("/refresh")
 async def refresh_token(
     request: RefreshTokenRequest,
+    http_request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    token = request.refresh_token
+    cookie_token = http_request.cookies.get(REFRESH_COOKIE_NAME)
+    token = cookie_token or request.refresh_token
 
     try:
+        if not token:
+            clear_refresh_cookie(response, http_request)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
+
         payload = decode_refresh_token(token)
         user_id = payload.get("sub")
 
@@ -952,32 +1059,30 @@ async def refresh_token(
         user_id = int(user_id)
 
     except HTTPException:
+        clear_refresh_cookie(response, http_request)
         raise
 
-    except (ValueError, TypeError):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-        )
-
-    except Exception:
+    except (JWTError, ValueError, TypeError):
+        clear_refresh_cookie(response, http_request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
         )
 
     result = await db.execute(
-        select(User).where(User.id == user_id)
+        select(User).where(User.id == user_id).with_for_update()
     )
     user = result.scalar_one_or_none()
 
     if user is None:
+        clear_refresh_cookie(response, http_request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
         )
 
     if user.refresh_token != token:
+        clear_refresh_cookie(response, http_request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token is invalid",
@@ -1008,12 +1113,54 @@ async def refresh_token(
 
     await db.commit()
     await db.refresh(user)
+    set_refresh_cookie(
+        response,
+        http_request,
+        new_refresh_token,
+        persistent=bool(cookie_token) or request.remember_me,
+    )
 
     return build_auth_response(
         user,
         new_access_token,
         new_refresh_token,
+        include_refresh_token=not (
+            bool(cookie_token) or request.remember_me
+        ),
     )
+
+
+@router.post("/logout")
+async def logout(
+    http_request: Request,
+    response: Response,
+    request: RefreshTokenRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    token = (
+        http_request.cookies.get(REFRESH_COOKIE_NAME)
+        or (request.refresh_token if request else None)
+    )
+
+    if token:
+        try:
+            payload = decode_refresh_token(token)
+            user_id = int(payload["sub"])
+        except (JWTError, KeyError, TypeError, ValueError):
+            user_id = None
+
+        if user_id is not None:
+            result = await db.execute(
+                select(User).where(User.id == user_id).with_for_update()
+            )
+            user = result.scalar_one_or_none()
+
+            if user is not None:
+                user.refresh_token = None
+                await db.commit()
+
+    clear_refresh_cookie(response, http_request)
+    return {"success": True, "message": "Logged out successfully."}
 
 
 # =========================================================
