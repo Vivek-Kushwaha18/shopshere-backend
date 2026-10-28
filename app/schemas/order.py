@@ -16,6 +16,11 @@ class OrderCreate(BaseModel):
     items: list[OrderItemCreate] = Field(..., min_length=1)
     coupon_code: str | None = Field(default=None, max_length=50)
     payment_method: Literal["stripe", "razorpay", "cod"] = "stripe"
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=16,
+        max_length=100,
+    )
 
 
 class OrderVariantOptionResponse(BaseModel):
@@ -29,6 +34,7 @@ class OrderItemResponse(BaseModel):
     product_id: int
     variant_id: int | None = None
     seller_id: int
+    seller_name: str | None = None
     product_name: str
     product_image: str | None = None
     variant_sku: str | None = None

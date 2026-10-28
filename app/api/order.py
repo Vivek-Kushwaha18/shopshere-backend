@@ -30,6 +30,58 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
 # =========================================================
+# STRIPE REFUND HELPERS
+# =========================================================
+
+def get_stripe_refund_status(refund) -> str:
+    """
+    Convert the Stripe refund status into a ShopSphere payment status.
+    """
+    refund_status = getattr(refund, "status", None)
+
+    if refund_status == "succeeded":
+        return "refunded"
+
+    if refund_status in {"pending", "requires_action"}:
+        return "refund_pending"
+
+    if refund_status in {"failed", "canceled"}:
+        return "refund_failed"
+
+    # Never report a refund as successful when its status is unknown.
+    return "refund_pending"
+
+
+def create_stripe_full_refund(payment_intent_id: str):
+    """
+    Create or retrieve the same full refund using a stable idempotency key.
+    This reduces duplicate refund risk when cancellation and webhook handling
+    occur close together.
+
+    Stripe's refund status must still be checked by the caller.
+    """
+    return stripe.Refund.create(
+        payment_intent=payment_intent_id,
+        idempotency_key=f"shopsphere-full-refund-{payment_intent_id}",
+    )
+
+
+def apply_stripe_refund_result(
+    payment: Payment,
+    order: Order,
+    refund,
+) -> None:
+    """
+    Update the local records based on Stripe's actual refund status.
+    """
+    mapped_status = get_stripe_refund_status(refund)
+
+    payment.transaction_id = refund.id
+    payment.status = mapped_status
+    order.payment_status = mapped_status
+
+
+# =========================================================
 # ORDER ITEM RESPONSE DATA
 # =========================================================
 
@@ -41,6 +93,7 @@ async def build_order_items_response(
         return []
 
     product_ids = {item.product_id for item in items}
+    seller_ids = {item.seller_id for item in items}
     variant_ids = {
         item.variant_id
         for item in items
@@ -53,6 +106,16 @@ async def build_order_items_response(
     products_by_id = {
         product.id: product
         for product in products_result.scalars().all()
+    }
+
+    sellers_result = await db.execute(
+        select(User.id, User.full_name).where(
+            User.id.in_(seller_ids)
+        )
+    )
+    seller_names_by_id = {
+        seller_id: full_name
+        for seller_id, full_name in sellers_result.all()
     }
 
     variants_by_id: dict[int, ProductVariant] = {}
@@ -170,6 +233,7 @@ async def build_order_items_response(
                 "product_id": item.product_id,
                 "variant_id": item.variant_id,
                 "seller_id": item.seller_id,
+                "seller_name": seller_names_by_id.get(item.seller_id),
                 "product_name": product.name,
                 "product_image": product_image,
                 "variant_sku": variant.sku if variant else None,
@@ -209,13 +273,70 @@ async def create_order(
             detail="Only customers can create orders.",
         )
 
+    # Serialize checkout requests using the same idempotency key. This
+    # prevents concurrent retries from creating duplicate orders.
+    if order_data.idempotency_key:
+        lock_key = (
+            f"shopsphere-order:{current_user.id}:"
+            f"{order_data.idempotency_key}"
+        )
+
+        await db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtext(lock_key)
+                )
+            )
+        )
+
+        existing_result = await db.execute(
+            select(Order)
+            .where(
+                Order.user_id == current_user.id,
+                Order.idempotency_key == order_data.idempotency_key,
+            )
+            .with_for_update()
+        )
+        existing_order = existing_result.scalar_one_or_none()
+
+        if existing_order is not None:
+            if existing_order.status != "cancelled":
+                existing_items_result = await db.execute(
+                    select(OrderItem).where(
+                        OrderItem.order_id == existing_order.id
+                    )
+                )
+                existing_items = existing_items_result.scalars().all()
+                item_response = await build_order_items_response(
+                    db,
+                    existing_items,
+                )
+
+                return OrderResponse(
+                    id=existing_order.id,
+                    user_id=existing_order.user_id,
+                    total_amount=existing_order.total_amount,
+                    discount_amount=existing_order.discount_amount,
+                    coupon_code=existing_order.coupon_code,
+                    status=existing_order.status,
+                    payment_status=existing_order.payment_status,
+                    shipping_address=existing_order.shipping_address,
+                    created_at=existing_order.created_at,
+                    updated_at=existing_order.updated_at,
+                    items=item_response,
+                )
+
+            # Preserve the cancelled order in history while freeing its key.
+            # A new purchase must create a different order row.
+            existing_order.idempotency_key = None
+            await db.flush()
+
     if not order_data.items:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Order must contain at least one item.",
         )
 
-    # Stripe, Razorpay and COD are supported order methods.
     if order_data.payment_method not in {"stripe", "razorpay", "cod"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -280,7 +401,6 @@ async def create_order(
                 detail="One or more selected product variants were not found.",
             )
 
-    # Validate stock and calculate prices from the database.
     subtotal = 0.0
 
     for item_data in order_data.items:
@@ -350,7 +470,6 @@ async def create_order(
 
         subtotal += item_price * item_data.quantity
 
-    # Validate coupon.
     discount_amount = 0.0
     coupon_code = None
     coupon = None
@@ -437,7 +556,6 @@ async def create_order(
 
     total_amount = round(max(subtotal - discount_amount, 0), 2)
 
-    # Create order. Online payments remain pending until verified.
     order_status = (
         "processing"
         if order_data.payment_method == "cod"
@@ -446,6 +564,7 @@ async def create_order(
 
     order = Order(
         user_id=current_user.id,
+        idempotency_key=order_data.idempotency_key,
         total_amount=total_amount,
         discount_amount=round(discount_amount, 2),
         coupon_code=coupon_code,
@@ -488,8 +607,6 @@ async def create_order(
 
     await db.flush()
 
-    # COD is unpaid at order creation. Online payment records are
-    # created by the corresponding payment endpoint.
     if order_data.payment_method == "cod":
         db.add(
             Payment(
@@ -774,7 +891,9 @@ async def update_seller_order_status(
         )
 
     result = await db.execute(
-        select(Order).where(Order.id == order_id)
+        select(Order)
+        .where(Order.id == order_id)
+        .with_for_update()
     )
     order = result.scalar_one_or_none()
 
@@ -782,6 +901,12 @@ async def update_seller_order_status(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Order not found.",
+        )
+
+    if order.status == "cancelled":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A cancelled order cannot be updated.",
         )
 
     seller_item_result = await db.execute(
@@ -869,7 +994,9 @@ async def cancel_order(
         )
 
     shipments_result = await db.execute(
-        select(Shipment).where(Shipment.order_id == order.id)
+        select(Shipment)
+        .where(Shipment.order_id == order.id)
+        .with_for_update()
     )
     shipments = shipments_result.scalars().all()
 
@@ -901,10 +1028,26 @@ async def cancel_order(
     )
     payment = payment_result.scalars().first()
 
-    # Stripe cancellation and refund handling.
+    # -----------------------------------------------------
+    # STRIPE PAYMENT
+    # -----------------------------------------------------
+
     if payment and payment.payment_method == "stripe":
         if payment.status == "refunded":
             order.payment_status = "refunded"
+
+        elif payment.status == "refund_pending":
+            order.payment_status = "refund_pending"
+
+        elif payment.status == "refund_failed":
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "The previous refund failed. Please contact support "
+                    "before cancelling this order."
+                ),
+            )
 
         elif payment.status == "paid":
             if not payment.stripe_payment_intent_id:
@@ -925,17 +1068,14 @@ async def cancel_order(
                         status_code=status.HTTP_409_CONFLICT,
                         detail=(
                             "The recorded payment status does not match "
-                            "Stripe. Please refresh your orders and try again."
+                            "Stripe. Refresh your orders and try again."
                         ),
                     )
 
-                refund = stripe.Refund.create(
-                    payment_intent=payment.stripe_payment_intent_id,
-                    idempotency_key=(
-                        f"shopsphere-cancel-order-{order.id}-"
-                        f"{payment.stripe_payment_intent_id}"
-                    ),
+                refund = create_stripe_full_refund(
+                    payment.stripe_payment_intent_id
                 )
+                apply_stripe_refund_result(payment, order, refund)
 
             except HTTPException:
                 raise
@@ -946,10 +1086,6 @@ async def cancel_order(
                     detail="Unable to process the Stripe refund.",
                 ) from exc
 
-            payment.status = "refunded"
-            payment.transaction_id = refund.id
-            order.payment_status = "refunded"
-
         elif payment.status in {"pending", "failed"}:
             if payment.stripe_payment_intent_id:
                 try:
@@ -959,16 +1095,10 @@ async def cancel_order(
                     intent_status = payment_intent.status
 
                     if intent_status == "succeeded":
-                        refund = stripe.Refund.create(
-                            payment_intent=payment.stripe_payment_intent_id,
-                            idempotency_key=(
-                                f"shopsphere-cancel-order-{order.id}-"
-                                f"{payment.stripe_payment_intent_id}"
-                            ),
+                        refund = create_stripe_full_refund(
+                            payment.stripe_payment_intent_id
                         )
-                        payment.status = "refunded"
-                        payment.transaction_id = refund.id
-                        order.payment_status = "refunded"
+                        apply_stripe_refund_result(payment, order, refund)
 
                     elif intent_status == "canceled":
                         payment.status = "cancelled"
@@ -1012,8 +1142,11 @@ async def cancel_order(
                     await db.rollback()
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Unable to verify or cancel the Stripe payment.",
+                        detail=(
+                            "Unable to verify or cancel the Stripe payment."
+                        ),
                     ) from exc
+
             else:
                 payment.status = "cancelled"
                 order.payment_status = "cancelled"
@@ -1031,24 +1164,46 @@ async def cancel_order(
                 ),
             )
 
-    # COD orders are unpaid and can be cancelled without a refund.
+    # -----------------------------------------------------
+    # COD PAYMENT
+    # -----------------------------------------------------
+
     elif payment and payment.payment_method == "cod":
-        payment.status = "cancelled"
-        order.payment_status = "cancelled"
-
-    elif not payment:
-        order.payment_status = "cancelled"
-
-    # Razorpay orders require provider-aware handling. Do not mark
-    # a captured Razorpay payment as cancelled without a refund.
-    elif payment.payment_method == "razorpay":
         if payment.status == "paid":
             await db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "This Razorpay payment has already been captured. "
-                    "A verified refund must be processed before cancelling."
+                    "This COD payment is marked paid. "
+                    "Please contact support before cancelling."
+                ),
+            )
+
+        payment.status = "cancelled"
+        order.payment_status = "cancelled"
+
+    # -----------------------------------------------------
+    # RAZORPAY PAYMENT
+    # -----------------------------------------------------
+
+    elif payment and payment.payment_method in {
+        "razorpay",
+        "razorpay_upi_qr",
+    }:
+        # This endpoint does not assume a Razorpay payment was refunded.
+        # A captured Razorpay payment needs provider-aware refund handling.
+        if payment.status in {
+            "paid",
+            "refund_pending",
+            "refund_failed",
+        }:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This Razorpay payment requires provider-side "
+                    "verification or refund processing before cancellation. "
+                    "No refund has been recorded by this request."
                 ),
             )
 
@@ -1057,15 +1212,31 @@ async def cancel_order(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "Verify that the Razorpay payment has not succeeded "
-                    "before cancelling this order."
+                    "The Razorpay payment may still be processing. "
+                    "Verify its status before cancelling this order."
                 ),
             )
 
         payment.status = "cancelled"
         order.payment_status = "cancelled"
 
-    # Restore stock.
+    elif not payment:
+        order.payment_status = "cancelled"
+
+    else:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This payment method cannot be cancelled automatically. "
+                "Please contact support."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # RESTORE STOCK
+    # -----------------------------------------------------
+
     for order_item in order_items:
         if order_item.variant_id is not None:
             variant_result = await db.execute(
@@ -1077,6 +1248,7 @@ async def cancel_order(
 
             if variant:
                 variant.stock += order_item.quantity
+
         else:
             product_result = await db.execute(
                 select(Product)
@@ -1088,19 +1260,29 @@ async def cancel_order(
             if product:
                 product.stock += order_item.quantity
 
-    should_reduce_coupon = bool(
+    # -----------------------------------------------------
+    # RESTORE COUPON USAGE
+    # -----------------------------------------------------
+
+    # A COD coupon is released when its unpaid order is cancelled.
+    # A Stripe coupon is released only after a successful refund or
+    # when the payment was cancelled before capture.
+    release_coupon = bool(
         order.coupon_code
         and payment
         and (
-            payment.payment_method == "cod"
+            (
+                payment.payment_method == "cod"
+                and payment.status == "cancelled"
+            )
             or (
                 payment.payment_method == "stripe"
-                and payment.status == "refunded"
+                and payment.status in {"refunded", "cancelled"}
             )
         )
     )
 
-    if should_reduce_coupon:
+    if release_coupon:
         coupon_result = await db.execute(
             select(Coupon)
             .where(Coupon.code == order.coupon_code)
@@ -1111,6 +1293,10 @@ async def cancel_order(
         if coupon and coupon.used_count > 0:
             coupon.used_count -= 1
 
+    # -----------------------------------------------------
+    # CANCEL ORDER AND REMOVE UNFULFILLED SHIPMENTS
+    # -----------------------------------------------------
+
     order.status = "cancelled"
 
     for shipment in shipments:
@@ -1120,7 +1306,14 @@ async def cancel_order(
     await db.refresh(order)
 
     return {
-        "message": "Order cancelled successfully.",
+        "message": (
+            "Order cancelled successfully."
+            if order.payment_status != "refund_pending"
+            else (
+                "Order cancelled. The refund is still processing "
+                "with the payment provider."
+            )
+        ),
         "order_id": order.id,
         "status": order.status,
         "payment_status": order.payment_status,

@@ -121,12 +121,7 @@ def require_razorpay() -> None:
 def create_razorpay_qr_via_api(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Create a Razorpay UPI QR code using the REST API.
-
-    Logs the request URL, HTTP status, and provider error without
-    logging credentials or authorization headers.
-    """
+    """Create a Razorpay UPI QR code using the REST API."""
     url = f"{RAZORPAY_API_BASE_URL}/payments/qr_codes"
 
     try:
@@ -182,7 +177,7 @@ def create_razorpay_qr_via_api(
 
     if not isinstance(result, dict):
         logger.error(
-            "Razorpay QR API returned an unexpected response type: %s",
+            "Razorpay QR API returned unexpected response type: %s",
             type(result).__name__,
         )
         raise HTTPException(
@@ -218,10 +213,14 @@ async def get_customer_order(
             detail="This order has been cancelled.",
         )
 
-    if order.payment_status == "paid":
+    if order.payment_status in {
+        "paid",
+        "refunded",
+        "refund_pending",
+    }:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This order has already been paid.",
+            detail="This order cannot accept another payment.",
         )
 
     if amount_in_paise(order.total_amount) <= 0:
@@ -235,7 +234,7 @@ async def get_customer_order(
 
 def get_stripe_address_from_order(order: Order) -> dict[str, Any]:
     """
-    Read the existing ShopSphere checkout address.
+    Read the checkout address stored as plain text.
 
     Expected format:
         Name: Customer Name
@@ -244,14 +243,11 @@ def get_stripe_address_from_order(order: Order) -> dict[str, Any]:
         City: City name
         State: State name
         Postal Code: 123456
-
-    This checkout currently stores address information as plain text.
     """
     address_data: dict[str, str] = {}
 
     for line in (order.shipping_address or "").splitlines():
         key, separator, value = line.partition(":")
-
         if separator:
             address_data[key.strip().lower()] = value.strip()
 
@@ -262,7 +258,13 @@ def get_stripe_address_from_order(order: Order) -> dict[str, Any]:
     postal_code = address_data.get("postal code", "").strip()
     phone = address_data.get("phone", "").strip()
 
-    if not name or not address_line or not city or not state_name or not postal_code:
+    if (
+        not name
+        or not address_line
+        or not city
+        or not state_name
+        or not postal_code
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -292,10 +294,7 @@ async def get_or_create_stripe_customer(
     db: AsyncSession,
     order: Order,
 ) -> str:
-    """
-    Create or update the Stripe Customer with the customer's
-    actual Indian address before initializing a payment.
-    """
+    """Create or update a Stripe customer with checkout address details."""
     if not STRIPE_SECRET_KEY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -303,13 +302,10 @@ async def get_or_create_stripe_customer(
         )
 
     address_data = get_stripe_address_from_order(order)
-
     customer_name = address_data["name"]
     customer_phone = address_data["phone"]
     customer_address = address_data["address"]
 
-    # The current checkout does not collect a separate billing address.
-    # Therefore, the shipping address is used as the billing address.
     customer_shipping: dict[str, Any] = {
         "name": customer_name,
         "address": customer_address,
@@ -349,7 +345,6 @@ async def get_or_create_stripe_customer(
                 "Stored Stripe customer is unavailable. user_id=%s",
                 user.id,
             )
-
         except stripe.error.StripeError as exc:
             raise stripe_error(
                 "Unable to update the Stripe customer address.",
@@ -463,12 +458,18 @@ async def create_payment_intent(
             detail="Stripe payment service is not configured.",
         )
 
-    order = await get_customer_order(data.order_id, current_user, db)
+    order = await get_customer_order(
+        data.order_id,
+        current_user,
+        db,
+    )
     amount = amount_in_paise(order.total_amount)
     currency = order_currency(order)
 
     existing = await get_pending_stripe_payment(
-        order, current_user, db
+        order,
+        current_user,
+        db,
     )
 
     if existing and existing.stripe_payment_intent_id:
@@ -638,7 +639,11 @@ async def create_saved_card_payment_intent(
             detail="Stripe payment service is not configured.",
         )
 
-    order = await get_customer_order(data.order_id, current_user, db)
+    order = await get_customer_order(
+        data.order_id,
+        current_user,
+        db,
+    )
 
     customer_id = await get_or_create_stripe_customer(
         current_user,
@@ -672,7 +677,9 @@ async def create_saved_card_payment_intent(
     currency = order_currency(order)
 
     existing = await get_pending_stripe_payment(
-        order, current_user, db
+        order,
+        current_user,
+        db,
     )
 
     if existing and existing.stripe_payment_intent_id:
@@ -707,21 +714,83 @@ async def create_saved_card_payment_intent(
 
                 return payment_response(existing, order, intent)
 
-            if old_intent.status in {
-                "requires_action",
-                "processing",
-                "succeeded",
-            }:
+            if old_intent.status == "requires_action":
+                # A previous card attempt may be left waiting for 3-D Secure.
+                # Reuse it when the customer selected the same card; otherwise
+                # cancel that unfinished attempt before creating a new one.
+                old_method_id = stripe_object_id(
+                    getattr(old_intent, "payment_method", None)
+                )
+
+                if old_method_id == data.payment_method_id:
+                    return payment_response(existing, order, old_intent)
+
+                try:
+                    stripe.PaymentIntent.cancel(old_intent.id)
+                except stripe.error.StripeError:
+                    # The provider may have advanced the attempt while we
+                    # were handling the retry. Re-read its actual status.
+                    latest_intent = stripe.PaymentIntent.retrieve(
+                        old_intent.id
+                    )
+
+                    if latest_intent.status in {"processing", "succeeded"}:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=(
+                                "Your previous payment is still processing. "
+                                "Check My Orders before trying another payment."
+                            ),
+                        )
+
+                    if latest_intent.status == "requires_action":
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=(
+                                "Your previous card payment still needs "
+                                "authentication. Select the same saved card "
+                                "to continue it, or finish/cancel that attempt "
+                                "before choosing another card."
+                            ),
+                        )
+
+                existing.status = "cancelled"
+                await db.commit()
+
+            elif old_intent.status in {"processing", "succeeded"}:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
-                        "Another payment attempt is in progress. "
-                        "Check your order status before retrying."
+                        "Your previous payment is already processing or completed. "
+                        "Check My Orders before trying another payment."
                     ),
                 )
+            else:
+                if old_intent.status != "canceled":
+                    try:
+                        stripe.PaymentIntent.cancel(old_intent.id)
+                    except stripe.error.StripeError:
+                        logger.warning(
+                            "Could not cancel previous saved-card PaymentIntent. "
+                            "payment_intent_id=%s status=%s",
+                            old_intent.id,
+                            old_intent.status,
+                            exc_info=True,
+                        )
+                        latest_intent = stripe.PaymentIntent.retrieve(
+                            old_intent.id
+                        )
+                        if latest_intent.status in {"processing", "succeeded"}:
+                            raise HTTPException(
+                                status_code=status.HTTP_409_CONFLICT,
+                                detail=(
+                                    "Your previous payment is already processing "
+                                    "or completed. Check My Orders before retrying."
+                                ),
+                            )
 
-            existing.status = "cancelled"
-            await db.commit()
+                existing.status = "cancelled"
+                await db.commit()
 
         except HTTPException:
             raise
@@ -750,7 +819,8 @@ async def create_saved_card_payment_intent(
         )
     except stripe.error.StripeError as exc:
         raise stripe_error(
-            "Unable to create payment with the saved card.", exc
+            "Unable to create payment with the saved card.",
+            exc,
         )
 
     payment = Payment(
@@ -780,7 +850,11 @@ async def create_razorpay_order(
     customer_only(current_user)
     require_razorpay()
 
-    order = await get_customer_order(data.order_id, current_user, db)
+    order = await get_customer_order(
+        data.order_id,
+        current_user,
+        db,
+    )
     amount = amount_in_paise(order.total_amount)
     currency = order_currency(order)
 
@@ -867,7 +941,11 @@ async def create_razorpay_qr(
     customer_only(current_user)
     require_razorpay()
 
-    order = await get_customer_order(data.order_id, current_user, db)
+    order = await get_customer_order(
+        data.order_id,
+        current_user,
+        db,
+    )
     amount = amount_in_paise(order.total_amount)
     currency = order_currency(order)
 
@@ -976,11 +1054,33 @@ async def fulfil_paid_order(
     order: Order,
     db: AsyncSession,
 ) -> None:
+    if (
+        order.status == "cancelled"
+        or order.payment_status in {
+            "cancelled",
+            "refunded",
+            "refund_pending",
+        }
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This order has been cancelled or is being refunded. "
+                "Payment cannot be applied to this order."
+            ),
+        )
+
+    # Avoid duplicate shipment and coupon updates for an already paid order.
+    if order.payment_status == "paid":
+        return
+
     order.payment_status = "paid"
     order.status = "processing"
 
     result = await db.execute(
-        select(OrderItem).where(OrderItem.order_id == order.id)
+        select(OrderItem).where(
+            OrderItem.order_id == order.id
+        )
     )
     items = result.scalars().all()
     seller_ids = {item.seller_id for item in items}
@@ -993,7 +1093,7 @@ async def fulfil_paid_order(
             )
         )
 
-        if shipment_result.scalar_one_or_none() is None:
+        if shipment_result.scalars().first() is None:
             db.add(
                 Shipment(
                     order_id=order.id,
@@ -1070,13 +1170,26 @@ async def verify_razorpay_qr_payment(
         }
 
     if (
-        payment.status in {"cancelled", "failed", "refunded"}
+        payment.status in {
+            "cancelled",
+            "failed",
+            "refunded",
+            "refund_pending",
+        }
         or order.status == "cancelled"
-        or order.payment_status == "paid"
+        or order.payment_status in {
+            "paid",
+            "cancelled",
+            "refunded",
+            "refund_pending",
+        }
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This payment can no longer be verified.",
+            detail=(
+                "This order has been cancelled or its payment "
+                "has already been finalized."
+            ),
         )
 
     try:
@@ -1105,9 +1218,8 @@ async def verify_razorpay_qr_payment(
             and provider_payment.get("captured") is True
             and provider_payment.get("method") == "upi"
             and provider_payment.get("amount") == expected_amount
-            and str(
-                provider_payment.get("currency", "")
-            ).upper() == order_currency(order).upper()
+            and str(provider_payment.get("currency", "")).upper()
+            == order_currency(order).upper()
             and provider_payment.get("refund_status") != "full"
         ):
             matching_payment = provider_payment
@@ -1147,14 +1259,17 @@ async def verify_razorpay_qr_payment(
             ),
         )
 
+    # Check order eligibility before recording the payment as paid.
     payment.razorpay_payment_id = provider_payment_id
     payment.transaction_id = provider_payment_id
-    payment.status = "paid"
-
-    await fulfil_paid_order(order, db)
 
     try:
+        await fulfil_paid_order(order, db)
+        payment.status = "paid"
         await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception:
         await db.rollback()
         logger.exception(
@@ -1224,18 +1339,32 @@ async def verify_razorpay_payment(
         )
 
     if payment.status == "paid" and order.payment_status == "paid":
-        return {"verified": True, "order_id": order.id}
+        return {
+            "verified": True,
+            "order_id": order.id,
+        }
 
-    if payment.status in {"cancelled", "failed", "refunded"}:
+    if (
+        payment.status in {
+            "cancelled",
+            "failed",
+            "refunded",
+            "refund_pending",
+        }
+        or order.status == "cancelled"
+        or order.payment_status in {
+            "paid",
+            "cancelled",
+            "refunded",
+            "refund_pending",
+        }
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This payment can no longer be verified.",
-        )
-
-    if order.status == "cancelled" or order.payment_status == "paid":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This order cannot accept another payment.",
+            detail=(
+                "This order has been cancelled or its payment "
+                "has already been finalized."
+            ),
         )
 
     expected_signature = hmac.new(
@@ -1248,7 +1377,8 @@ async def verify_razorpay_payment(
     ).hexdigest()
 
     if not hmac.compare_digest(
-        expected_signature, data.razorpay_signature
+        expected_signature,
+        data.razorpay_signature,
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1321,12 +1451,14 @@ async def verify_razorpay_payment(
     payment.razorpay_payment_id = data.razorpay_payment_id
     payment.razorpay_signature = data.razorpay_signature
     payment.transaction_id = data.razorpay_payment_id
-    payment.status = "paid"
-
-    await fulfil_paid_order(order, db)
 
     try:
+        await fulfil_paid_order(order, db)
+        payment.status = "paid"
         await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception:
         await db.rollback()
         logger.exception(
@@ -1341,7 +1473,10 @@ async def verify_razorpay_payment(
             ),
         )
 
-    return {"verified": True, "order_id": order.id}
+    return {
+        "verified": True,
+        "order_id": order.id,
+    }
 
 
 # =========================================================
@@ -1417,7 +1552,11 @@ async def handle_successful_payment(
     )
     payment = result.scalar_one_or_none()
 
-    if payment is None or payment.status == "paid":
+    if payment is None:
+        logger.error(
+            "Stripe payment record not found. payment_intent_id=%s",
+            payment_intent_id,
+        )
         return
 
     order_result = await db.execute(
@@ -1450,25 +1589,74 @@ async def handle_successful_payment(
         )
         return
 
-    if (
+    if payment.status == "paid" and order.payment_status == "paid":
+        return
+
+    must_refund = (
         order.status == "cancelled"
-        or order.payment_status == "paid"
-        or payment.status in {"cancelled", "failed", "refunded"}
-    ):
+        or order.payment_status in {
+            "cancelled",
+            "refunded",
+            "refund_pending",
+        }
+        or payment.status in {
+            "cancelled",
+            "failed",
+            "refunded",
+            "refund_pending",
+        }
+    )
+
+    if must_refund:
         try:
             refund = stripe.Refund.create(
                 payment_intent=payment_intent_id,
                 idempotency_key=(
-                    f"shopsphere-late-success-{payment_intent_id}"
+                    f"shopsphere-full-refund-{payment_intent_id}"
                 ),
             )
         except stripe.error.StripeError as exc:
+            logger.exception(
+                "Stripe refund creation failed. order_id=%s",
+                order.id,
+            )
             raise stripe_error(
-                "Unable to refund a late or duplicate payment.", exc
+                "Unable to refund the late or cancelled payment. "
+                "Please contact support if the payment was charged.",
+                exc,
             )
 
-        payment.status = "refunded"
+        refund_status = getattr(refund, "status", None)
         payment.transaction_id = refund.id
+
+        if refund_status == "succeeded":
+            payment.status = "refunded"
+            order.payment_status = "refunded"
+
+        elif refund_status in {"pending", "requires_action"}:
+            payment.status = "refund_pending"
+            order.payment_status = "refund_pending"
+
+        elif refund_status == "failed":
+            # Do not tell the customer that a failed refund succeeded.
+            payment.status = "paid"
+            order.payment_status = "paid"
+            logger.error(
+                "Stripe refund failed. order_id=%s refund_id=%s",
+                order.id,
+                refund.id,
+            )
+
+        else:
+            payment.status = "refund_pending"
+            order.payment_status = "refund_pending"
+            logger.error(
+                "Unexpected Stripe refund status. order_id=%s "
+                "refund_id=%s status=%s",
+                order.id,
+                refund.id,
+                refund_status,
+            )
 
         try:
             await db.commit()
@@ -1485,10 +1673,12 @@ async def handle_successful_payment(
     payment.status = "paid"
     payment.transaction_id = payment_intent_id
 
-    await fulfil_paid_order(order, db)
-
     try:
+        await fulfil_paid_order(order, db)
         await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception:
         await db.rollback()
         logger.exception(

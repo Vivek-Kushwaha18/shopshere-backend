@@ -1,3 +1,4 @@
+
 from datetime import datetime
 
 from sqlalchemy import (
@@ -7,6 +8,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,6 +17,14 @@ from app.models.base import Base
 
 class Order(Base):
     __tablename__ = "orders"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_orders_user_id_idempotency_key",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -26,6 +36,11 @@ class Order(Base):
         ForeignKey("users.id"),
         nullable=False,
         index=True,
+    )
+
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
     )
 
     total_amount: Mapped[float] = mapped_column(

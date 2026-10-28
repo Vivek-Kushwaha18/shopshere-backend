@@ -1,3 +1,4 @@
+
 from datetime import datetime
 
 from sqlalchemy import (
@@ -100,9 +101,27 @@ class Payment(Base):
         index=True,
     )
 
-    # Transaction reference from the payment provider
+    # Original payment transaction reference
     transaction_id: Mapped[str | None] = mapped_column(
         String(255),
+        nullable=True,
+        index=True,
+    )
+
+    # Refund information
+    refund_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    refund_amount: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    refund_status: Mapped[str | None] = mapped_column(
+        String(30),
         nullable=True,
         index=True,
     )

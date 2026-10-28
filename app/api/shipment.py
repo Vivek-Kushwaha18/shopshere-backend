@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_seller, get_current_user
 from app.database.database import get_db
-from app.models.order import Order
+from app.models.order import Order, OrderItem
 from app.models.payment import Payment
 from app.models.shipment import Shipment
 from app.models.user import User
@@ -127,6 +127,110 @@ async def get_my_shipments(
         serialize_shipment(shipment)
         for shipment in result.scalars().all()
     ]
+
+
+# =========================================================
+# SELLER - CREATE DELIVERY SHIPMENT FOR AN ORDER
+# =========================================================
+
+@router.post(
+    "/seller/order/{order_id}",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_seller_shipment(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_seller: User = Depends(get_current_seller),
+):
+    try:
+        # Lock the order while checking and creating the shipment.
+        order_result = await db.execute(
+            select(Order)
+            .where(Order.id == order_id)
+            .with_for_update()
+        )
+
+        order = order_result.scalar_one_or_none()
+
+        if order is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found.",
+            )
+
+        if (order.status or "").strip().lower() == "cancelled":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A shipment cannot be created for a cancelled order.",
+            )
+
+        # A seller can create a shipment only for an order
+        # containing at least one of their own products.
+        item_result = await db.execute(
+            select(OrderItem.id)
+            .where(
+                OrderItem.order_id == order_id,
+                OrderItem.seller_id == current_seller.id,
+            )
+            .limit(1)
+        )
+
+        seller_has_order_item = item_result.scalar_one_or_none()
+
+        if seller_has_order_item is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This order does not contain any products belonging to you.",
+            )
+
+        # Return the seller's existing shipment rather than
+        # creating another shipment for the same order.
+        existing_result = await db.execute(
+            select(Shipment).where(
+                Shipment.order_id == order_id,
+                Shipment.seller_id == current_seller.id,
+            )
+        )
+
+        existing_shipment = existing_result.scalar_one_or_none()
+
+        if existing_shipment is not None:
+            await db.commit()
+
+            return {
+                "message": "A shipment already exists for this order.",
+                "shipment": serialize_shipment(existing_shipment),
+            }
+
+        shipment = Shipment(
+            order_id=order_id,
+            seller_id=current_seller.id,
+            tracking_number=None,
+            status="processing",
+        )
+
+        db.add(shipment)
+        await db.flush()
+
+        # Synchronize the order with its current shipment statuses.
+        await synchronize_order_status(db, order)
+
+        await db.commit()
+        await db.refresh(shipment)
+        await db.refresh(order)
+
+        return {
+            "message": "Delivery shipment created successfully.",
+            "shipment": serialize_shipment(shipment),
+        }
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        raise
 
 
 # =========================================================
