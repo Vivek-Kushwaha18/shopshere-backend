@@ -1,9 +1,13 @@
-
 from datetime import datetime
+import csv
+import io
+import json
+import zipfile
 
 import stripe
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,17 +52,12 @@ def get_stripe_refund_status(refund) -> str:
     if refund_status in {"failed", "canceled"}:
         return "refund_failed"
 
-    # Never report a refund as successful when its status is unknown.
     return "refund_pending"
 
 
 def create_stripe_full_refund(payment_intent_id: str):
     """
     Create or retrieve the same full refund using a stable idempotency key.
-    This reduces duplicate refund risk when cancellation and webhook handling
-    occur close together.
-
-    Stripe's refund status must still be checked by the caller.
     """
     return stripe.Refund.create(
         payment_intent=payment_intent_id,
@@ -72,7 +71,7 @@ def apply_stripe_refund_result(
     refund,
 ) -> None:
     """
-    Update the local records based on Stripe's actual refund status.
+    Update local records using Stripe's actual refund status.
     """
     mapped_status = get_stripe_refund_status(refund)
 
@@ -273,8 +272,6 @@ async def create_order(
             detail="Only customers can create orders.",
         )
 
-    # Serialize checkout requests using the same idempotency key. This
-    # prevents concurrent retries from creating duplicate orders.
     if order_data.idempotency_key:
         lock_key = (
             f"shopsphere-order:{current_user.id}:"
@@ -326,8 +323,6 @@ async def create_order(
                     items=item_response,
                 )
 
-            # Preserve the cancelled order in history while freeing its key.
-            # A new purchase must create a different order row.
             existing_order.idempotency_key = None
             await db.flush()
 
@@ -807,6 +802,262 @@ async def get_seller_revenue(
 
 
 # =========================================================
+# SELLER - DOWNLOAD REVENUE ZIP
+# =========================================================
+
+@router.get("/seller/revenue/export")
+async def export_seller_revenue(
+    db: AsyncSession = Depends(get_db),
+    current_seller: User = Depends(get_current_seller),
+):
+    """
+    Download a ZIP containing this seller's revenue summary,
+    daily revenue, and order items.
+
+    All order-item queries are scoped to the authenticated seller.
+    Customer shipping addresses and other sellers' items are excluded.
+    """
+
+    seller_id = current_seller.id
+
+    # -----------------------------------------------------
+    # SELLER REVENUE SUMMARY
+    # -----------------------------------------------------
+
+    summary_result = await db.execute(
+        select(
+            func.count(func.distinct(OrderItem.order_id)).label(
+                "total_orders"
+            ),
+            func.coalesce(
+                func.sum(OrderItem.quantity), 0
+            ).label("total_units"),
+            func.coalesce(
+                func.sum(OrderItem.total), 0
+            ).label("gross_sales"),
+        )
+        .where(OrderItem.seller_id == seller_id)
+    )
+
+    summary_row = summary_result.one()
+
+    total_orders = int(summary_row.total_orders or 0)
+    total_units = int(summary_row.total_units or 0)
+    gross_sales = float(summary_row.gross_sales or 0)
+
+    summary_data = {
+        "seller_id": seller_id,
+        "seller_name": current_seller.full_name,
+        "exported_at_utc": datetime.utcnow().isoformat() + "Z",
+        "currency": "INR",
+        "total_orders": total_orders,
+        "total_units": total_units,
+        "gross_sales": round(gross_sales, 2),
+        "revenue_definition": (
+            "Gross value of this seller's order items. "
+            "This is not a confirmed-paid-revenue calculation; "
+            "order and payment statuses may vary."
+        ),
+    }
+
+    # -----------------------------------------------------
+    # DAILY REVENUE CSV
+    # -----------------------------------------------------
+
+    daily_result = await db.execute(
+        select(
+            func.date(Order.created_at).label("date"),
+            func.count(
+                func.distinct(Order.id)
+            ).label("orders"),
+            func.coalesce(
+                func.sum(OrderItem.quantity), 0
+            ).label("units"),
+            func.coalesce(
+                func.sum(OrderItem.total), 0
+            ).label("sales"),
+        )
+        .join(
+            OrderItem,
+            OrderItem.order_id == Order.id,
+        )
+        .where(
+            OrderItem.seller_id == seller_id,
+        )
+        .group_by(func.date(Order.created_at))
+        .order_by(func.date(Order.created_at))
+    )
+
+    daily_output = io.StringIO(newline="")
+    daily_writer = csv.writer(daily_output)
+
+    daily_writer.writerow(
+        ["date", "orders", "units", "gross_sales_inr"]
+    )
+
+    for date, orders, units, sales in daily_result.all():
+        daily_writer.writerow(
+            [
+                str(date),
+                int(orders or 0),
+                int(units or 0),
+                f"{float(sales or 0):.2f}",
+            ]
+        )
+
+    daily_csv = daily_output.getvalue()
+    daily_output.close()
+
+    # -----------------------------------------------------
+    # SELLER ORDER ITEMS CSV
+    # -----------------------------------------------------
+
+    items_result = await db.execute(
+        select(
+            Order.id.label("order_id"),
+            Order.created_at.label("order_date"),
+            Order.status.label("order_status"),
+            Order.payment_status.label("payment_status"),
+            OrderItem.id.label("order_item_id"),
+            OrderItem.product_id.label("product_id"),
+            Product.name.label("product_name"),
+            OrderItem.variant_id.label("variant_id"),
+            OrderItem.quantity.label("quantity"),
+            OrderItem.price.label("unit_price"),
+            OrderItem.total.label("item_total"),
+        )
+        .join(
+            OrderItem,
+            OrderItem.order_id == Order.id,
+        )
+        .join(
+            Product,
+            Product.id == OrderItem.product_id,
+        )
+        .where(
+            OrderItem.seller_id == seller_id,
+        )
+        .order_by(
+            Order.created_at.desc(),
+            Order.id.desc(),
+            OrderItem.id.asc(),
+        )
+    )
+
+    items_output = io.StringIO(newline="")
+    items_writer = csv.writer(items_output)
+
+    items_writer.writerow(
+        [
+            "order_id",
+            "order_date",
+            "order_status",
+            "payment_status",
+            "order_item_id",
+            "product_id",
+            "product_name",
+            "variant_id",
+            "quantity",
+            "unit_price_inr",
+            "item_total_inr",
+        ]
+    )
+
+    for row in items_result.all():
+        items_writer.writerow(
+            [
+                row.order_id,
+                (
+                    row.order_date.isoformat()
+                    if row.order_date
+                    else ""
+                ),
+                row.order_status or "",
+                row.payment_status or "",
+                row.order_item_id,
+                row.product_id,
+                row.product_name or "",
+                (
+                    row.variant_id
+                    if row.variant_id is not None
+                    else ""
+                ),
+                int(row.quantity or 0),
+                f"{float(row.unit_price or 0):.2f}",
+                f"{float(row.item_total or 0):.2f}",
+            ]
+        )
+
+    items_csv = items_output.getvalue()
+    items_output.close()
+
+    # -----------------------------------------------------
+    # CREATE ZIP FILE IN MEMORY
+    # -----------------------------------------------------
+
+    readme = (
+        "ShopSphere Seller Revenue Export\n"
+        "================================\n\n"
+        f"Seller ID: {seller_id}\n"
+        f"Seller name: {current_seller.full_name or 'Seller'}\n"
+        f"Exported at (UTC): {summary_data['exported_at_utc']}\n"
+        "Currency: INR\n\n"
+        "Files included:\n"
+        "1. revenue_summary.json - seller revenue totals\n"
+        "2. revenue_by_date.csv - daily order, unit, and sales totals\n"
+        "3. seller_order_items.csv - order items belonging to this seller\n\n"
+        "Important:\n"
+        "Gross sales are the sum of this seller's order-item totals.\n"
+        "They are not necessarily confirmed paid revenue. Check the\n"
+        "payment_status and order_status columns in seller_order_items.csv.\n"
+        "Customer shipping addresses and other sellers' order items are\n"
+        "not included in this export.\n"
+    )
+
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(
+        zip_buffer,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as zip_file:
+        zip_file.writestr(
+            "revenue_summary.json",
+            json.dumps(
+                summary_data,
+                indent=2,
+                ensure_ascii=False,
+            ),
+        )
+        zip_file.writestr(
+            "revenue_by_date.csv",
+            daily_csv,
+        )
+        zip_file.writestr(
+            "seller_order_items.csv",
+            items_csv,
+        )
+        zip_file.writestr(
+            "README.txt",
+            readme,
+        )
+
+    zip_buffer.seek(0)
+
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="shopsphere-seller-revenue.zip"'
+            ),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# =========================================================
 # SELLER - MY ORDERS
 # =========================================================
 
@@ -1190,8 +1441,6 @@ async def cancel_order(
         "razorpay",
         "razorpay_upi_qr",
     }:
-        # This endpoint does not assume a Razorpay payment was refunded.
-        # A captured Razorpay payment needs provider-aware refund handling.
         if payment.status in {
             "paid",
             "refund_pending",
@@ -1264,9 +1513,6 @@ async def cancel_order(
     # RESTORE COUPON USAGE
     # -----------------------------------------------------
 
-    # A COD coupon is released when its unpaid order is cancelled.
-    # A Stripe coupon is released only after a successful refund or
-    # when the payment was cancelled before capture.
     release_coupon = bool(
         order.coupon_code
         and payment
