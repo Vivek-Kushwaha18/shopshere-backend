@@ -172,12 +172,113 @@ def build_auth_response(
 # SHARED EMAIL VERIFICATION HELPERS
 # =========================================================
 
+# Website requests use their Origin header; native Android requests normally
+# omit Origin and keep their existing authentication behavior.
+# This is a client-behavior distinction, not a security boundary: Origin can be spoofed.
+def is_browser_auth_request(request: Request) -> bool:
+    default_origins = {
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://shopshere-frontend-theta.vercel.app",
+    }
+    configured_origins = {
+        origin.strip().rstrip("/")
+        for origin in os.getenv("BROWSER_AUTH_ORIGINS", "").split(",")
+        if origin.strip()
+    }
+    origin = request.headers.get("origin", "").strip().rstrip("/")
+    return bool(origin and origin in (default_origins | configured_origins))
+
+
+def utc_aware(value: datetime | None) -> datetime | None:
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+OTP_SEND_LIMIT = 3
+OTP_SEND_WINDOW = timedelta(minutes=4)
+
+
+def count_browser_signup_otp(user: User, request: Request, initial_signup: bool = False) -> None:
+    """Allow the initial signup OTP plus three subsequent OTP requests per email.
+
+    Signup retries and resends share the same three-request allowance.
+    Only recognized website requests are counted.
+    """
+    if not is_browser_auth_request(request):
+        return
+
+    now = datetime.now(timezone.utc)
+    started = utc_aware(user.signup_otp_window_started_at)
+    count = user.signup_otp_count or 0
+
+    if initial_signup:
+        user.signup_otp_window_started_at = now
+        user.signup_otp_count = 0
+        return
+
+    if started is None or now >= started + OTP_SEND_WINDOW:
+        user.signup_otp_window_started_at = now
+        user.signup_otp_count = 1
+        return
+
+    if count >= OTP_SEND_LIMIT:
+        remaining_seconds = max(0, int((started + OTP_SEND_WINDOW - now).total_seconds()))
+        remaining_minutes = max(1, (remaining_seconds + 59) // 60)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"OTP sending is temporarily paused after {OTP_SEND_LIMIT} "
+                "resend attempts. "
+                f"Please try again in {remaining_minutes} minute(s). "
+                "Your account is not blocked."
+            ),
+        )
+
+    user.signup_otp_count = count + 1
+
+
+def check_browser_login_lock(user: User, request: Request) -> None:
+    if not is_browser_auth_request(request):
+        return
+    now = datetime.now(timezone.utc)
+    locked_until = utc_aware(user.login_locked_until)
+    if locked_until is not None and now < locked_until:
+        remaining = max(1, int((locked_until - now).total_seconds() // 60) + 1)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Login is temporarily paused after 5 incorrect password attempts. "
+                f"Please try again in {remaining} minute(s). "
+                "Your account is not blocked."
+            ),
+        )
+    if locked_until is not None:
+        user.login_locked_until = None
+        user.login_failed_attempts = 0
+
+
+def record_browser_failed_login(user: User, request: Request) -> None:
+    if not is_browser_auth_request(request):
+        return
+    user.login_failed_attempts += 1
+    if user.login_failed_attempts >= 5:
+        user.login_locked_until = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+
+def reset_browser_failed_login(user: User, request: Request) -> None:
+    if is_browser_auth_request(request):
+        user.login_failed_attempts = 0
+        user.login_locked_until = None
+
+
 def set_verification_code(user: User) -> str:
     code = create_verification_code()
 
     user.verification_code = code
     user.verification_code_expires = (
-        datetime.now(timezone.utc) + timedelta(minutes=10)
+        datetime.now(timezone.utc) + timedelta(minutes=4)
     )
 
     return code
@@ -298,12 +399,13 @@ async def get_current_user(
 async def signup(
     user_data: SignupRequest,
     background_tasks: BackgroundTasks,
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     email = str(user_data.email).strip().lower()
 
     result = await db.execute(
-        select(User).where(func.lower(User.email) == email)
+        select(User).where(func.lower(User.email) == email).with_for_update()
     )
     existing_user = result.scalar_one_or_none()
 
@@ -317,19 +419,13 @@ async def signup(
                 ),
             )
 
-        password_is_correct = password_hash.verify(
-            user_data.password,
-            existing_user.password_hash,
-        )
+        count_browser_signup_otp(existing_user, http_request)
 
-        if not password_is_correct:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "An unverified account already exists with "
-                    "this email."
-                ),
-            )
+        # Update the password immediately for an unverified signup retry.
+        existing_user.password_hash = await run_in_threadpool(
+            password_hash.hash,
+            user_data.password,
+        )
 
         existing_user.full_name = user_data.full_name.strip()
         existing_user.phone = (
@@ -372,6 +468,7 @@ async def signup(
         is_verified=False,
     )
 
+    count_browser_signup_otp(user, http_request, initial_signup=True)
     code = set_verification_code(user)
 
     db.add(user)
@@ -420,12 +517,13 @@ async def signup(
 async def send_verification_code(
     request: SendVerificationCodeRequest,
     background_tasks: BackgroundTasks,
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     email = str(request.email).strip().lower()
 
     result = await db.execute(
-        select(User).where(func.lower(User.email) == email)
+        select(User).where(func.lower(User.email) == email).with_for_update()
     )
     user = result.scalar_one_or_none()
 
@@ -452,6 +550,7 @@ async def send_verification_code(
             },
         }
 
+    count_browser_signup_otp(user, http_request)
     code = set_verification_code(user)
 
     await db.commit()
@@ -560,7 +659,7 @@ async def login(
     email = str(login_data.email).strip().lower()
 
     result = await db.execute(
-        select(User).where(func.lower(User.email) == email)
+        select(User).where(func.lower(User.email) == email).with_for_update()
     )
     user = result.scalar_one_or_none()
 
@@ -570,11 +669,27 @@ async def login(
             detail="Invalid email or password",
         )
 
+    check_browser_login_lock(user, request)
+
     if not await run_in_threadpool(
         password_hash.verify,
         login_data.password,
         user.password_hash,
     ):
+        record_browser_failed_login(user, request)
+        reached_limit = (
+            is_browser_auth_request(request)
+            and user.login_failed_attempts >= 5
+        )
+        await db.commit()
+        if reached_limit:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Login is temporarily paused after 5 incorrect password attempts. "
+                    "Please try again after 10 minutes. Your account is not blocked."
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
@@ -597,6 +712,8 @@ async def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid user role",
         )
+
+    reset_browser_failed_login(user, request)
 
     access_token = create_access_token(user.id, user.role)
     refresh_token = create_refresh_token(user.id, user.role)
@@ -753,6 +870,7 @@ async def google_login(
         )
 
     # Create a new Google account as an unverified customer.
+    is_new_google_signup = user is None
     if user is None:
         full_name = claims.get("name")
 
@@ -808,6 +926,9 @@ async def google_login(
 
     # Do not issue tokens to an unverified account.
     if not user.is_verified:
+        # Serialize concurrent OTP sends for an existing account.
+        await db.refresh(user, with_for_update=True)
+        count_browser_signup_otp(user, http_request, initial_signup=is_new_google_signup)
         code = set_verification_code(user)
 
         try:
@@ -978,12 +1099,13 @@ async def verify_google_otp(
 async def resend_google_otp(
     request: SendVerificationCodeRequest,
     background_tasks: BackgroundTasks,
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     email = str(request.email).strip().lower()
 
     result = await db.execute(
-        select(User).where(func.lower(User.email) == email)
+        select(User).where(func.lower(User.email) == email).with_for_update()
     )
     user = result.scalar_one_or_none()
 
@@ -1007,6 +1129,7 @@ async def resend_google_otp(
             detail="User account is inactive.",
         )
 
+    count_browser_signup_otp(user, http_request)
     code = set_verification_code(user)
 
     await db.commit()

@@ -1,3 +1,4 @@
+
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -30,8 +31,10 @@ class CategoryUpdate(BaseModel):
 class CategoryResponse(BaseModel):
     id: int
     name: str
-    slug: str
+    slug: str | None
     description: str | None
+
+    icon_url: str | None
 
     parent_id: int | None
 
@@ -40,5 +43,6 @@ class CategoryResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+    }

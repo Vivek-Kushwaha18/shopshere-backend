@@ -1,3 +1,4 @@
+
 import os
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,8 +29,18 @@ STORAGE_BACKEND = STORAGE_BACKEND.lower()
 
 LOCAL_UPLOAD_DIR = Path("uploads/products")
 
+CATEGORY_ICON_DIR = Path(
+    "uploads/categories/icons"
+)
+
 if STORAGE_BACKEND == "local":
+
     LOCAL_UPLOAD_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    CATEGORY_ICON_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
@@ -90,7 +101,7 @@ if STORAGE_BACKEND == "s3":
 
 
 # =========================================================
-# UPLOAD IMAGE
+# UPLOAD PRODUCT IMAGE
 # =========================================================
 
 def upload_product_image(
@@ -161,7 +172,7 @@ def upload_product_image(
 
 
 # =========================================================
-# DELETE IMAGE
+# DELETE PRODUCT IMAGE
 # =========================================================
 
 def delete_product_image(
@@ -219,4 +230,156 @@ def delete_product_image(
     ):
         # Database operation should not fail
         # only because old image cleanup failed.
+        pass
+
+
+# =========================================================
+# UPLOAD CATEGORY ICON
+# =========================================================
+
+def upload_category_icon(
+    contents: bytes,
+    filename: str,
+    extension: str,
+    content_type: str,
+    base_url: str,
+) -> str:
+
+    final_filename = f"{Path(filename).stem}{extension}"
+
+    # =====================================================
+    # LOCAL
+    # =====================================================
+
+    if STORAGE_BACKEND == "local":
+
+        file_path = (
+            CATEGORY_ICON_DIR / final_filename
+        )
+
+        file_path.write_bytes(contents)
+
+        return (
+            f"{base_url.rstrip('/')}"
+            f"/uploads/categories/icons/{final_filename}"
+        )
+
+    # =====================================================
+    # S3
+    # =====================================================
+
+    object_key = (
+        f"categories/icons/{final_filename}"
+    )
+
+    try:
+        s3_client.put_object(
+            Bucket=AWS_S3_BUCKET,
+            Key=object_key,
+            Body=contents,
+            ContentType=content_type,
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+    ) as error:
+
+        raise RuntimeError(
+            f"Failed to upload category icon to S3: {error}"
+        ) from error
+
+    # Custom public URL / CloudFront URL
+    if AWS_S3_PUBLIC_BASE_URL:
+
+        return (
+            f"{AWS_S3_PUBLIC_BASE_URL.rstrip('/')}"
+            f"/{object_key}"
+        )
+
+    return (
+        f"https://{AWS_S3_BUCKET}.s3."
+        f"{AWS_REGION}.amazonaws.com/"
+        f"{object_key}"
+    )
+
+
+# =========================================================
+# DELETE CATEGORY ICON
+# =========================================================
+
+def delete_category_icon(
+    image_url: str,
+) -> None:
+
+    if not image_url:
+        return
+
+    parsed = urlparse(image_url)
+
+    # =====================================================
+    # LOCAL
+    # =====================================================
+
+    if STORAGE_BACKEND == "local":
+
+        prefix = "/uploads/categories/icons/"
+
+        if not parsed.path.startswith(prefix):
+            return
+
+        filename = Path(
+            parsed.path
+        ).name
+
+        if not filename.startswith("category-"):
+            return
+
+        file_path = (
+            CATEGORY_ICON_DIR / filename
+        )
+
+        if file_path.is_file():
+            file_path.unlink()
+
+        return
+
+    # =====================================================
+    # S3
+    # =====================================================
+
+    object_key = parsed.path.lstrip("/")
+
+    if AWS_S3_PUBLIC_BASE_URL:
+
+        public_path = urlparse(
+            AWS_S3_PUBLIC_BASE_URL
+        ).path.strip("/")
+
+        if public_path:
+
+            prefix = public_path + "/"
+
+            if not object_key.startswith(prefix):
+                return
+
+            object_key = object_key[len(prefix):]
+
+    if not object_key.startswith(
+        "categories/icons/category-"
+    ):
+        return
+
+    try:
+        s3_client.delete_object(
+            Bucket=AWS_S3_BUCKET,
+            Key=object_key,
+        )
+
+    except (
+        BotoCoreError,
+        ClientError,
+    ):
+        # Do not fail the database operation
+        # if old icon cleanup fails.
         pass

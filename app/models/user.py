@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -74,6 +74,30 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Signup OTP rate limiting.
+    signup_otp_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+
+    signup_otp_window_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Login failed-attempt rate limiting.
+    login_failed_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+
+    login_locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     products: Mapped[list["Product"]] = relationship(
         "Product", back_populates="seller"
     )
@@ -98,7 +122,8 @@ class User(Base):
     )
 
     email_change_code_expires: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     orders: Mapped[list["Order"]] = relationship(

@@ -1,3 +1,4 @@
+
 from datetime import datetime
 
 from sqlalchemy import (
@@ -40,6 +41,11 @@ class Category(Base):
 
     description: Mapped[str | None] = mapped_column(
         Text,
+        nullable=True,
+    )
+
+    icon_url: Mapped[str | None] = mapped_column(
+        String(1000),
         nullable=True,
     )
 
