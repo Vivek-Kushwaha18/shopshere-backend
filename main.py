@@ -4,6 +4,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api.category import router as category_router
+
+# ============================================================
+# PRODUCT RECOMMENDATIONS
+# ============================================================
+
+from app.api.product_recommendations import (
+    router as product_recommendations_router,
+)
+
 from app.api.product import router as product_router
 from app.api.auth import router as auth_router
 from app.api.cart import router as cart_router
@@ -18,13 +27,20 @@ from app.api.review import router as review_router
 from app.api.shipment import router as shipment_router
 from app.api.product_variants import router as product_variants_router
 from app.api.product_options import router as product_options_router
+
 from app.api.product_variant_images import (
     router as product_variant_images_router,
 )
+
 from app.api.chat import (
     router as chat_router,
     admin_router as admin_ai_conversations_router,
 )
+
+
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
 
 app = FastAPI(
     title="ShopSphere API",
@@ -39,7 +55,10 @@ app = FastAPI(
 
 app.mount(
     "/uploads",
-    StaticFiles(directory="uploads", check_dir=False),
+    StaticFiles(
+        directory="uploads",
+        check_dir=False,
+    ),
     name="uploads",
 )
 
@@ -65,19 +84,48 @@ app.add_middleware(
 # ROUTERS
 # ============================================================
 
+# Categories
 app.include_router(category_router)
+
+# Product recommendations and viewing history
+# Registered before product routes to avoid path conflicts.
+app.include_router(product_recommendations_router)
+
+# Products
 app.include_router(product_router)
+
+# Authentication
 app.include_router(auth_router)
+
+# Cart
 app.include_router(cart_router)
+
+# Orders
 app.include_router(order_router)
+
+# Addresses
 app.include_router(address_router)
+
+# Payments
 app.include_router(payment_router)
+
+# Wishlist
 app.include_router(wishlist_router)
+
+# Reports
 app.include_router(reports_router)
+
+# Coupons
 app.include_router(coupon_router)
 app.include_router(customer_coupon_router)
+
+# Reviews
 app.include_router(review_router)
+
+# Shipments
 app.include_router(shipment_router)
+
+# Product variants and options
 app.include_router(product_variants_router)
 app.include_router(product_options_router)
 app.include_router(product_variant_images_router)

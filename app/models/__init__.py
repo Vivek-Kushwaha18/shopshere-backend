@@ -13,3 +13,4 @@ from app.models.product_option_value import ProductOptionValue
 from app.models.product_variant import ProductVariant
 from app.models.product_variant_value import ProductVariantValue
 from app.models.ai_conversation import AIConversation, AIMessage
+from app.models.user_product_view import UserProductView

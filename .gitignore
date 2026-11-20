@@ -8,3 +8,6 @@ __pycache__/
 uploads/products
 .env.docker
 config.py
+uploads/categories
+api_documentation.zip
+api_documentation
