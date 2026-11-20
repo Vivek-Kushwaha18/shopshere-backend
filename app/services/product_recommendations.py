@@ -10,9 +10,14 @@ from app.models.product import Product
 from app.models.user import User
 from app.models.user_product_view import UserProductView
 
+
 MAX_VIEW_HISTORY = 50
 DEFAULT_RECOMMENDATIONS = 12
 
+
+# =====================================================
+# AVAILABLE PRODUCT FILTER
+# =====================================================
 
 def available_product_filter():
     return (
@@ -21,6 +26,10 @@ def available_product_filter():
         Product.stock > 0,
     )
 
+
+# =====================================================
+# RECORD PRODUCT VIEW
+# =====================================================
 
 async def record_product_view(
     db: AsyncSession,
@@ -35,6 +44,7 @@ async def record_product_view(
             .with_for_update()
         )
 
+        # Verify that the product exists.
         result = await db.execute(
             select(Product.id).where(
                 Product.id == product_id,
@@ -49,6 +59,7 @@ async def record_product_view(
                 detail="Product not found",
             )
 
+        # Find an existing view for this user and product.
         result = await db.execute(
             select(UserProductView).where(
                 UserProductView.user_id == user_id,
@@ -65,12 +76,15 @@ async def record_product_view(
             )
             db.add(existing_view)
 
+        # Update the timestamp even if the user
+        # has viewed this product before.
         existing_view.viewed_at = datetime.now(
             timezone.utc
         )
 
         await db.flush()
 
+        # Keep the most recent 50 unique products.
         result = await db.execute(
             select(UserProductView.id)
             .where(UserProductView.user_id == user_id)
@@ -108,6 +122,10 @@ async def record_product_view(
         raise
 
 
+# =====================================================
+# GET RECENT PRODUCT IDS
+# =====================================================
+
 async def get_recent_product_ids(
     db: AsyncSession,
     user_id: int,
@@ -125,6 +143,10 @@ async def get_recent_product_ids(
 
     return list(result.scalars().all())
 
+
+# =====================================================
+# GET RECENTLY VIEWED PRODUCTS
+# =====================================================
 
 async def get_recently_viewed_products(
     db: AsyncSession,
@@ -162,6 +184,10 @@ async def get_recently_viewed_products(
     ]
 
 
+# =====================================================
+# GET CATEGORY RELATIONSHIPS
+# =====================================================
+
 async def get_category_relationships(
     db: AsyncSession,
 ):
@@ -178,6 +204,10 @@ async def get_category_relationships(
         for category in categories
     }
 
+
+# =====================================================
+# GET CATEGORY FAMILY
+# =====================================================
 
 def get_category_family(
     category_id: int,
@@ -214,6 +244,10 @@ def get_category_family(
     return family
 
 
+# =====================================================
+# GET PERSONALIZED RECOMMENDATIONS
+# =====================================================
+
 async def get_recommended_products(
     db: AsyncSession,
     user_id: int | None = None,
@@ -223,6 +257,10 @@ async def get_recommended_products(
     from app.api.product import product_load_options
 
     current_product = None
+
+    # -------------------------------------------------
+    # SPECIFIC PRODUCT RECOMMENDATIONS
+    # -------------------------------------------------
 
     if product_id is not None:
         result = await db.execute(
@@ -240,6 +278,10 @@ async def get_recommended_products(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Product not found",
             )
+
+    # -------------------------------------------------
+    # USER VIEW HISTORY
+    # -------------------------------------------------
 
     history_ids = []
 
@@ -268,6 +310,10 @@ async def get_recommended_products(
             if viewed_id in category_by_product
         ]
 
+    # -------------------------------------------------
+    # CATEGORY RELATIONSHIPS
+    # -------------------------------------------------
+
     parents = await get_category_relationships(db)
 
     related_categories = set()
@@ -278,7 +324,10 @@ async def get_recommended_products(
             parents,
         )
 
-    # Retrieve actual available products.
+    # -------------------------------------------------
+    # FETCH AVAILABLE PRODUCTS
+    # -------------------------------------------------
+
     query = (
         select(Product)
         .options(*product_load_options())
@@ -294,20 +343,37 @@ async def get_recommended_products(
 
     candidates = result.scalars().all()
 
-    # Recent interests receive more weight.
+    # -------------------------------------------------
+    # LATEST VIEWED PRODUCT PRIORITY
+    # -------------------------------------------------
+
+    latest_category_id = (
+        history_categories[0]
+        if history_categories
+        else None
+    )
+
+    # Older interests provide secondary personalization.
     interest_scores: dict[int, float] = {}
 
     for index, category_id in enumerate(
-        history_categories
+        history_categories[1:],
+        start=1,
     ):
         interest_scores[category_id] = (
             interest_scores.get(category_id, 0)
-            + max(1.0, 5.0 - index * 0.1)
+            + 1.0 / (index + 1)
         )
+
+    # -------------------------------------------------
+    # RECOMMENDATION SCORING
+    # -------------------------------------------------
 
     def recommendation_score(product: Product):
         score = 0.0
 
+        # Products related to the currently opened
+        # product receive priority.
         if current_product is not None:
             if (
                 product.category_id
@@ -329,11 +395,21 @@ async def get_recommended_products(
             elif product.category_id in related_categories:
                 score += 45
 
+        # Highest priority:
+        # Same category as most recently viewed product.
+        if (
+            latest_category_id is not None
+            and product.category_id == latest_category_id
+        ):
+            score += 1000
+
+        # Smaller contribution from older views.
         score += interest_scores.get(
             product.category_id,
             0,
         ) * 5
 
+        # Product quality signals.
         score += min(
             float(product.rating or 0),
             5.0,
@@ -345,6 +421,10 @@ async def get_recommended_products(
         ) * 0.05
 
         return score
+
+    # -------------------------------------------------
+    # SORT BY RECOMMENDATION SCORE
+    # -------------------------------------------------
 
     candidates.sort(
         key=lambda product: (
