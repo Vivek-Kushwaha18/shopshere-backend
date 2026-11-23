@@ -6,9 +6,12 @@ from sqlalchemy.orm import selectinload
 
 from app.api.auth import get_current_user
 from app.database.database import get_db
+
 from app.models.product import Product
 from app.models.review import Review
 from app.models.user import User
+from app.models.order import Order, OrderItem
+
 from app.schemas.review import (
     ReviewCreate,
     ReviewResponse,
@@ -74,6 +77,37 @@ def review_response(review: Review) -> dict:
 
 
 # ======================================================
+# VERIFY DELIVERED PURCHASE
+# ======================================================
+
+async def has_delivered_purchase(
+    user_id: int,
+    product_id: int,
+    db: AsyncSession,
+) -> bool:
+    """
+    Returns True only if the customer has an order
+    containing this product with status 'delivered'.
+    """
+
+    result = await db.execute(
+        select(Order.id)
+        .join(
+            OrderItem,
+            OrderItem.order_id == Order.id,
+        )
+        .where(
+            Order.user_id == user_id,
+            OrderItem.product_id == product_id,
+            func.lower(Order.status) == "delivered",
+        )
+        .limit(1)
+    )
+
+    return result.scalar_one_or_none() is not None
+
+
+# ======================================================
 # GET MY REVIEWS
 # GET /reviews/me
 # AUTHENTICATION REQUIRED
@@ -90,7 +124,9 @@ async def get_my_reviews(
     result = await db.execute(
         select(Review)
         .options(selectinload(Review.user))
-        .where(Review.user_id == current_user.id)
+        .where(
+            Review.user_id == current_user.id
+        )
         .order_by(Review.created_at.desc())
     )
 
@@ -117,7 +153,9 @@ async def get_product_reviews(
     db: AsyncSession = Depends(get_db),
 ):
     product_result = await db.execute(
-        select(Product).where(Product.id == product_id)
+        select(Product).where(
+            Product.id == product_id
+        )
     )
 
     product = product_result.scalar_one_or_none()
@@ -131,7 +169,9 @@ async def get_product_reviews(
     result = await db.execute(
         select(Review)
         .options(selectinload(Review.user))
-        .where(Review.product_id == product_id)
+        .where(
+            Review.product_id == product_id
+        )
         .order_by(Review.created_at.desc())
     )
 
@@ -147,6 +187,7 @@ async def get_product_reviews(
 # CREATE REVIEW
 # POST /reviews
 # CUSTOMER ONLY
+# DELIVERED PURCHASE REQUIRED
 # ======================================================
 
 @router.post(
@@ -159,11 +200,19 @@ async def create_review(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # ==================================================
+    # CUSTOMER ROLE CHECK
+    # ==================================================
+
     if current_user.role != "customer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only customers can write reviews",
         )
+
+    # ==================================================
+    # PRODUCT VALIDATION
+    # ==================================================
 
     product_result = await db.execute(
         select(Product).where(
@@ -181,6 +230,10 @@ async def create_review(
             detail="Product not found",
         )
 
+    # ==================================================
+    # CHECK EXISTING REVIEW
+    # ==================================================
+
     existing_result = await db.execute(
         select(Review).where(
             Review.product_id == review_data.product_id,
@@ -196,6 +249,29 @@ async def create_review(
             detail="You have already reviewed this product",
         )
 
+    # ==================================================
+    # VERIFY DELIVERED PURCHASE
+    # ==================================================
+
+    delivered = await has_delivered_purchase(
+        user_id=current_user.id,
+        product_id=review_data.product_id,
+        db=db,
+    )
+
+    if not delivered:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "You can review this product only after "
+                "your order has been delivered."
+            ),
+        )
+
+    # ==================================================
+    # CREATE REVIEW
+    # ==================================================
+
     review = Review(
         user_id=current_user.id,
         product_id=review_data.product_id,
@@ -206,6 +282,10 @@ async def create_review(
     db.add(review)
 
     await db.flush()
+
+    # ==================================================
+    # UPDATE PRODUCT RATING
+    # ==================================================
 
     await update_product_rating(
         review_data.product_id,
@@ -240,7 +320,9 @@ async def update_review(
     result = await db.execute(
         select(Review)
         .options(selectinload(Review.user))
-        .where(Review.id == review_id)
+        .where(
+            Review.id == review_id
+        )
     )
 
     review = result.scalar_one_or_none()
@@ -291,7 +373,9 @@ async def delete_review(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(Review).where(Review.id == review_id)
+        select(Review).where(
+            Review.id == review_id
+        )
     )
 
     review = result.scalar_one_or_none()
