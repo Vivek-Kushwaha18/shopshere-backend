@@ -49,7 +49,9 @@ async def update_product_rating(
     average_rating, reviews_count = result.one()
 
     product_result = await db.execute(
-        select(Product).where(Product.id == product_id)
+        select(Product).where(
+            Product.id == product_id
+        )
     )
 
     product = product_result.scalar_one_or_none()
@@ -85,11 +87,6 @@ async def has_delivered_purchase(
     product_id: int,
     db: AsyncSession,
 ) -> bool:
-    """
-    Returns True only if the customer has an order
-    containing this product with status 'delivered'.
-    """
-
     result = await db.execute(
         select(Order.id)
         .join(
@@ -110,7 +107,6 @@ async def has_delivered_purchase(
 # ======================================================
 # GET MY REVIEWS
 # GET /reviews/me
-# AUTHENTICATION REQUIRED
 # ======================================================
 
 @router.get(
@@ -139,9 +135,79 @@ async def get_my_reviews(
 
 
 # ======================================================
+# CHECK REVIEW ELIGIBILITY
+# GET /reviews/eligibility/{product_id}
+# ======================================================
+
+@router.get("/eligibility/{product_id}")
+async def get_review_eligibility(
+    product_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Check whether product exists
+    product = await db.scalar(
+        select(Product).where(
+            Product.id == product_id
+        )
+    )
+
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+
+    # Check whether user already reviewed product
+    existing_review = await db.scalar(
+        select(Review).where(
+            Review.user_id == current_user.id,
+            Review.product_id == product_id,
+        )
+    )
+
+    # Check whether customer purchased and received product
+    delivered = await has_delivered_purchase(
+        user_id=current_user.id,
+        product_id=product_id,
+        db=db,
+    )
+
+    if existing_review is not None:
+        return {
+            "can_review": False,
+            "has_reviewed": True,
+            "has_delivered_order": delivered,
+            "reason": "You have already reviewed this product.",
+        }
+
+    if current_user.role != "customer":
+        return {
+            "can_review": False,
+            "has_reviewed": False,
+            "has_delivered_order": delivered,
+            "reason": "Only customers can write reviews.",
+        }
+
+    if not delivered:
+        return {
+            "can_review": False,
+            "has_reviewed": False,
+            "has_delivered_order": False,
+            "reason": "You can review this product only after delivery.",
+        }
+
+    return {
+        "can_review": True,
+        "has_reviewed": False,
+        "has_delivered_order": True,
+        "reason": "You can write a review.",
+    }
+
+
+# ======================================================
 # GET ALL REVIEWS FOR A PRODUCT
 # GET /reviews/product/{product_id}
-# PUBLIC ENDPOINT
 # ======================================================
 
 @router.get(
@@ -186,8 +252,6 @@ async def get_product_reviews(
 # ======================================================
 # CREATE REVIEW
 # POST /reviews
-# CUSTOMER ONLY
-# DELIVERED PURCHASE REQUIRED
 # ======================================================
 
 @router.post(
@@ -200,19 +264,11 @@ async def create_review(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # ==================================================
-    # CUSTOMER ROLE CHECK
-    # ==================================================
-
     if current_user.role != "customer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only customers can write reviews",
         )
-
-    # ==================================================
-    # PRODUCT VALIDATION
-    # ==================================================
 
     product_result = await db.execute(
         select(Product).where(
@@ -230,10 +286,6 @@ async def create_review(
             detail="Product not found",
         )
 
-    # ==================================================
-    # CHECK EXISTING REVIEW
-    # ==================================================
-
     existing_result = await db.execute(
         select(Review).where(
             Review.product_id == review_data.product_id,
@@ -248,10 +300,6 @@ async def create_review(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You have already reviewed this product",
         )
-
-    # ==================================================
-    # VERIFY DELIVERED PURCHASE
-    # ==================================================
 
     delivered = await has_delivered_purchase(
         user_id=current_user.id,
@@ -268,10 +316,6 @@ async def create_review(
             ),
         )
 
-    # ==================================================
-    # CREATE REVIEW
-    # ==================================================
-
     review = Review(
         user_id=current_user.id,
         product_id=review_data.product_id,
@@ -283,17 +327,12 @@ async def create_review(
 
     await db.flush()
 
-    # ==================================================
-    # UPDATE PRODUCT RATING
-    # ==================================================
-
     await update_product_rating(
         review_data.product_id,
         db,
     )
 
     await db.commit()
-
     await db.refresh(review)
 
     review.user = current_user
@@ -304,7 +343,6 @@ async def create_review(
 # ======================================================
 # UPDATE REVIEW
 # PUT /reviews/{review_id}
-# REVIEW OWNER ONLY
 # ======================================================
 
 @router.put(
@@ -350,7 +388,6 @@ async def update_review(
     )
 
     await db.commit()
-
     await db.refresh(review)
 
     review.user = current_user
@@ -361,12 +398,9 @@ async def update_review(
 # ======================================================
 # DELETE REVIEW
 # DELETE /reviews/{review_id}
-# REVIEW OWNER OR ADMIN
 # ======================================================
 
-@router.delete(
-    "/{review_id}",
-)
+@router.delete("/{review_id}")
 async def delete_review(
     review_id: int,
     current_user: User = Depends(get_current_user),
@@ -398,7 +432,6 @@ async def delete_review(
     product_id = review.product_id
 
     await db.delete(review)
-
     await db.flush()
 
     await update_product_rating(
