@@ -11,3 +11,15 @@ config.py
 uploads/categories
 api_documentation.zip
 api_documentation
+# Python virtual environments
+venv/
+venv_old/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local secrets
+.env
+.env.*
