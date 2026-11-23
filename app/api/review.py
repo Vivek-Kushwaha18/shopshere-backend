@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,11 +16,19 @@ from app.schemas.review import (
 )
 
 
+# ======================================================
+# REVIEW ROUTER
+# ======================================================
+
 router = APIRouter(
     prefix="/reviews",
     tags=["Reviews"],
 )
 
+
+# ======================================================
+# UPDATE PRODUCT AVERAGE RATING AND REVIEW COUNT
+# ======================================================
 
 async def update_product_rating(
     product_id: int,
@@ -47,6 +56,10 @@ async def update_product_rating(
         product.reviews_count = int(reviews_count or 0)
 
 
+# ======================================================
+# REVIEW RESPONSE HELPER
+# ======================================================
+
 def review_response(review: Review) -> dict:
     return {
         "id": review.id,
@@ -59,6 +72,41 @@ def review_response(review: Review) -> dict:
         "user_name": review.user.full_name,
     }
 
+
+# ======================================================
+# GET MY REVIEWS
+# GET /reviews/me
+# AUTHENTICATION REQUIRED
+# ======================================================
+
+@router.get(
+    "/me",
+    response_model=list[ReviewResponse],
+)
+async def get_my_reviews(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Review)
+        .options(selectinload(Review.user))
+        .where(Review.user_id == current_user.id)
+        .order_by(Review.created_at.desc())
+    )
+
+    reviews = result.scalars().all()
+
+    return [
+        review_response(review)
+        for review in reviews
+    ]
+
+
+# ======================================================
+# GET ALL REVIEWS FOR A PRODUCT
+# GET /reviews/product/{product_id}
+# PUBLIC ENDPOINT
+# ======================================================
 
 @router.get(
     "/product/{product_id}",
@@ -94,6 +142,12 @@ async def get_product_reviews(
         for review in reviews
     ]
 
+
+# ======================================================
+# CREATE REVIEW
+# POST /reviews
+# CUSTOMER ONLY
+# ======================================================
 
 @router.post(
     "",
@@ -167,6 +221,12 @@ async def create_review(
     return review_response(review)
 
 
+# ======================================================
+# UPDATE REVIEW
+# PUT /reviews/{review_id}
+# REVIEW OWNER ONLY
+# ======================================================
+
 @router.put(
     "/{review_id}",
     response_model=ReviewResponse,
@@ -215,6 +275,12 @@ async def update_review(
 
     return review_response(review)
 
+
+# ======================================================
+# DELETE REVIEW
+# DELETE /reviews/{review_id}
+# REVIEW OWNER OR ADMIN
+# ======================================================
 
 @router.delete(
     "/{review_id}",
